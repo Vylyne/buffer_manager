@@ -445,14 +445,19 @@ The shipped sources are **byte-identical** to the deployment validated in produc
 
 ## Status / disclaimer
 
-**⚠️ No warranty — use at your own risk.** This is experimental, community firmware provided **AS-IS, with NO WARRANTY of any kind** (see the [GPL-3.0](LICENSE) license — *Disclaimer of Warranty* §15 and *Limitation of Liability* §16). Flashing MCU firmware **can brick the board or damage hardware**. You assume **all** risk; the author accepts **no liability** for any damage, bricked board, failed/ruined print, or other loss. **Back up your existing firmware first** (Step 2) and make sure you understand each step before running it.
+**⚠️ No warranty — use at your own risk.** This is experimental, community firmware provided **AS-IS, with NO WARRANTY of any kind** (see the [GPL-3.0](LICENSE) license — *Disclaimer of Warranty* §15 and *Limitation of Liability* §16). Flashing MCU firmware **can brick the board or damage hardware**. You assume **all** risk; the authors accept **no liability** for any damage, bricked board, failed/ruined print, or other loss. **Back up your existing firmware first** (Step 2) and make sure you understand each step before running it.
 
-## Credits
+**We tested this as far as our own hardware allowed — no further.** Everything marked "field-proven" was proven on **one** reference setup (two lanes, one printer); anything beyond that (other boards revisions, other printers, more lanes, the multicolor pipeline itself) is *your* experiment, on *your* responsibility. If you follow this repo, you do so at your own risk — and we would genuinely love to hear how it went, but we are in no way responsible for the outcome.
 
-- **[Fly3DTeam / Mellow](https://github.com/Fly3DTeam/Buffer)** — original FLY Buffer firmware & hardware (state machine ported from their open source).
+## Credits — who did what
+
+This project did not start here, and it was not built by one pair of hands:
+
+- **The idea comes from the community.** [Fly3DTeam / Mellow](https://github.com/Fly3DTeam/Buffer) published the original FLY Buffer firmware & hardware (the autonomous state machine is ported from their open source); [river29](https://github.com/river29/Mellow-LLLBufferPLUS-klipper), [ss1gohan13](https://github.com/ss1gohan13/BufferPLUS-klipper) and [depau/lll-buffed](https://github.com/depau/lll-buffed) opened the Klipper road before us; and the buffer-feeding discussions in the community (notably [this TeamFDM thread](https://www.teamfdm.com/forums/topic/7617-faster-printing-requiring-filament-buffer-feeding/)) are where the need and the ideas took shape.
+- **Constraints, resolutions and field testing — [Nitrooxyde](https://github.com/Nitrooxyde).** The design decisions under real-world constraints (USB-only, one board per lane, park-first safety, sensors at determined positions with measured distances) and every hour of bench and production validation on the reference setup.
+- **Implementation — Claude (Anthropic's AI).** The firmware, the host extra, the dashboard and the documentation were written by Claude working in pair with Nitrooxyde — it is what made this project possible, and it is stated here openly (see also the `Co-Authored-By` in the commit history). We would rather say it upfront than have anyone feel misled.
 - **[Klipper](https://github.com/Klipper3d/klipper)** — MCU firmware framework and host.
 - **[Katapult](https://github.com/Arksine/katapult)** — USB bootloader. Install guide without opening the case: [LLL-Plus-Katapult-NoDFU](https://github.com/Nitrooxyde/LLL-Plus-Katapult-NoDFU).
-- Community Klipper integrations: [river29](https://github.com/river29/Mellow-LLLBufferPLUS-klipper), [ss1gohan13](https://github.com/ss1gohan13/BufferPLUS-klipper).
 - **[Spoolman](https://github.com/Donkie/Spoolman)** — spool database (optional integration).
 
 ## License
