@@ -1,0 +1,61 @@
+name: 🐛 Bug report
+description: Something misbehaved — the more detail you give, the better we can help and evolve the repo.
+labels: ["bug"]
+body:
+  - type: markdown
+    attributes:
+      value: |
+        Thanks for testing! This firmware was validated on **one** reference setup only —
+        detailed reports from other setups are exactly what makes it evolve.
+        Please fill in as much as you can; "how the problem presented itself" matters as much as the problem.
+  - type: input
+    id: firmware
+    attributes:
+      label: Firmware build
+      description: From Mainsail's MCU version or `printer.objects` (e.g. v0.13.0-700-…-20260705_234145), and whether you used the prebuilt binary or built from source.
+      placeholder: v0.13.0-700-gd6ea62542-dirty-20260705_234145 — prebuilt
+    validations:
+      required: true
+  - type: textarea
+    id: setup
+    attributes:
+      label: Your setup
+      description: Printer, Klipper version, number of LLL Plus boards/lanes, how they are powered, splitter or independent feeds, relevant sensors (runout, extruder-entry…), filament type.
+      placeholder: |
+        Voron 2.4 350, Klipper v0.13.x, 2× LLL Plus (24V PSU, USB to Pi 5),
+        passive 4-to-1 splitter, extruder-entry sensor, ASA-CF
+    validations:
+      required: true
+  - type: textarea
+    id: what
+    attributes:
+      label: What happened — and how it presented itself
+      description: Symptom, when it appears (boot? mid-print? after a command? after a restart?), whether it is repeatable, and what you expected instead.
+    validations:
+      required: true
+  - type: textarea
+    id: repro
+    attributes:
+      label: Steps to reproduce
+      placeholder: |
+        1. …
+        2. …
+        3. symptom appears
+    validations:
+      required: false
+  - type: textarea
+    id: query
+    attributes:
+      label: LLL_QUERY output at the moment of the problem
+      description: Run `LLL_QUERY LANE=<lane>` for the affected lane(s) and paste the state line(s) (role/mode/error/ecode/feeding/arm/present…).
+      render: text
+    validations:
+      required: false
+  - type: textarea
+    id: logs
+    attributes:
+      label: Relevant klippy.log excerpt and config sections
+      description: The minutes around the event in klippy.log, plus your `[lll_buffer …]` sections (and macros if involved).
+      render: text
+    validations:
+      required: false

@@ -1,0 +1,36 @@
+name: 🧪 Field test report
+description: You tried it on your setup — tell us how it went (good or bad, both help).
+labels: ["field-report"]
+body:
+  - type: markdown
+    attributes:
+      value: |
+        This firmware is only validated on one reference setup so far.
+        Every report from a different setup — success, partial success or failure — directly drives what we improve next. Thank you!
+  - type: textarea
+    id: setup
+    attributes:
+      label: Your setup
+      description: Printer, Klipper version, number of LLL Plus boards, powering, feed topology (independent feeds? splitter? multicolor attempt?), sensors present.
+    validations:
+      required: true
+  - type: textarea
+    id: tested
+    attributes:
+      label: What you tested
+      description: Flash procedure, autonomous feed, host commands, roles, multi-lane, dashboard, LCD menu, macros, long prints…
+    validations:
+      required: true
+  - type: textarea
+    id: results
+    attributes:
+      label: How it went
+      description: What worked, what surprised you, what felt fragile, any friction in the docs/install — with as much detail as you can on HOW things presented themselves.
+    validations:
+      required: true
+  - type: textarea
+    id: ideas
+    attributes:
+      label: Anything you'd want next?
+    validations:
+      required: false
