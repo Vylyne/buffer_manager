@@ -437,6 +437,25 @@ On the reference setup, filament color changes are done **manually**: there is n
 
 The **[experimental/phase-c/](experimental/phase-c/README.md)** folder exposes, purely for information and **without any official status**, a 46-line evolution of the firmware: a grace period at boot plus an optional `rewind_pause` behaviour. It was written, reviewed, flashed and bench-tested — then **withdrawn from the reference setup**: the `rewind_pause` option proved dangerous on a lane actively printing. Since then, **its grace-period half has been re-derived, hardened (tick-level done-latch) and integrated into the official firmware as safety fix #9** — what remains specific to this folder is the `rewind_pause` story. It is provided as-is for feedback and testing by people who know what they are doing; it is **not** what the shipped binary contains. Details, diff and post-mortem: [experimental/phase-c/README.md](experimental/phase-c/README.md).
 
+## 🙏 We're asking for your feedback — it's what makes this evolve
+
+This firmware has been validated on **one** setup. If you get the chance to
+try it on yours, **please tell us how it went** — we are genuinely asking:
+
+- **It misbehaved?** Open a [🐛 bug report](../../issues/new?template=bug_report.yml)
+  — and give us as much detail as you can on **how the problem presented
+  itself** (when, doing what, repeatable or not, `LLL_QUERY` output, log
+  excerpt). That detail is exactly what lets us keep improving this repo.
+- **It worked? Partially? Surprised you?** A [🧪 field test report](../../issues/new?template=test_report.yml)
+  is just as valuable — successes from different setups tell us what is
+  solid, failures tell us what to fix next.
+- PRs welcome too, and general discussion lives in the
+  [TeamFDM thread](https://www.teamfdm.com/forums/topic/7617-faster-printing-requiring-filament-buffer-feeding/)
+  where this project took shape.
+
+Don't hesitate — no report is too small, and none of them will be met with
+anything but gratitude.
+
 ## Language note
 
 The shipped sources are **byte-identical** to the deployment validated in production on the reference setup — that is the core guarantee of this repo, backed by the published SHA-256 fingerprints. As a consequence, some runtime messages and code comments are in **French**. Translations are welcome as PRs, but be aware they would break the byte-for-byte identity with the deployed code — which is why the shipped files themselves are left untouched.
