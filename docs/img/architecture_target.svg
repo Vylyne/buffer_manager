@@ -1,0 +1,78 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 980 430" font-family="Segoe UI, Arial, sans-serif">
+  <defs>
+    <marker id="ar2" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse">
+      <path d="M0,0 L10,5 L0,10 z" fill="#555"/>
+    </marker>
+  </defs>
+  <rect x="0" y="0" width="980" height="430" fill="#ffffff"/>
+  <text x="20" y="30" font-size="17" font-weight="bold" fill="#24292f">Target rig — what removes the guesswork (green = the equipment we lacked)</text>
+
+  <!-- spools + passive rewinders -->
+  <rect x="20" y="70" width="150" height="210" rx="10" fill="#f6f8fa" stroke="#8b949e" stroke-dasharray="6 4"/>
+  <text x="95" y="92" font-size="12" fill="#57606a" text-anchor="middle">Dryer / spool bay</text>
+  <circle cx="65" cy="145" r="24" fill="#fff" stroke="#57606a" stroke-width="2"/>
+  <circle cx="65" cy="145" r="7" fill="#d0d7de"/>
+  <rect x="42" y="176" width="46" height="16" rx="4" fill="#dafbe1" stroke="#1a7f37"/>
+  <text x="65" y="188" font-size="8.5" fill="#1a7f37" text-anchor="middle">rewinder</text>
+  <circle cx="125" cy="222" r="24" fill="#fff" stroke="#57606a" stroke-width="2"/>
+  <circle cx="125" cy="222" r="7" fill="#d0d7de"/>
+  <rect x="102" y="253" width="46" height="16" rx="4" fill="#dafbe1" stroke="#1a7f37"/>
+  <text x="125" y="265" font-size="8.5" fill="#1a7f37" text-anchor="middle">rewinder</text>
+  <text x="95" y="296" font-size="9.5" fill="#1a7f37" text-anchor="middle">passive respoolers: retracted</text>
+  <text x="95" y="308" font-size="9.5" fill="#1a7f37" text-anchor="middle">filament winds itself back</text>
+
+  <!-- LLL lanes -->
+  <rect x="230" y="90" width="160" height="72" rx="8" fill="#ddf4ff" stroke="#0969da" stroke-width="1.5"/>
+  <text x="310" y="112" font-size="12.5" font-weight="bold" fill="#0969da" text-anchor="middle">LLL Plus — lane 1</text>
+  <text x="310" y="129" font-size="10" fill="#24292f" text-anchor="middle">buffer + entrance sensor</text>
+  <text x="310" y="144" font-size="10" fill="#24292f" text-anchor="middle">feeds / rewinds its lane</text>
+
+  <rect x="230" y="200" width="160" height="72" rx="8" fill="#ddf4ff" stroke="#0969da" stroke-width="1.5"/>
+  <text x="310" y="222" font-size="12.5" font-weight="bold" fill="#0969da" text-anchor="middle">LLL Plus — lane N</text>
+  <text x="310" y="239" font-size="10" fill="#24292f" text-anchor="middle">buffer + entrance sensor</text>
+  <text x="310" y="254" font-size="10" fill="#24292f" text-anchor="middle">feeds / rewinds its lane</text>
+
+  <!-- pre-splitter sensor (green, optional) -->
+  <rect x="418" y="120" width="86" height="46" rx="7" fill="#dafbe1" stroke="#1a7f37" stroke-width="1.5"/>
+  <text x="461" y="139" font-size="10.5" font-weight="bold" fill="#1a7f37" text-anchor="middle">sensor #1</text>
+  <text x="461" y="153" font-size="9" fill="#1a7f37" text-anchor="middle">before splitter</text>
+
+  <!-- splitter -->
+  <path d="M540,140 L586,175 L586,205 L540,240 Z" fill="#fff8c5" stroke="#9a6700" stroke-width="1.5"/>
+  <text x="565" y="168" font-size="11" font-weight="bold" fill="#9a6700" text-anchor="middle">Y</text>
+  <text x="562" y="262" font-size="10.5" fill="#9a6700" text-anchor="middle">passive splitter</text>
+
+  <!-- post-splitter sensor -->
+  <rect x="620" y="167" width="86" height="46" rx="7" fill="#ffebe9" stroke="#cf222e" stroke-width="1.5"/>
+  <text x="663" y="186" font-size="10.5" font-weight="bold" fill="#cf222e" text-anchor="middle">sensor #2</text>
+  <text x="663" y="200" font-size="9" fill="#cf222e" text-anchor="middle">after splitter (SFS)</text>
+
+  <!-- toolhead with cutter -->
+  <rect x="750" y="140" width="200" height="106" rx="8" fill="#dafbe1" stroke="#1a7f37" stroke-width="1.5"/>
+  <text x="850" y="162" font-size="12" font-weight="bold" fill="#1a7f37" text-anchor="middle">Toolhead (direct drive)</text>
+  <text x="850" y="180" font-size="10" fill="#24292f" text-anchor="middle">extruder-entry presence sensor</text>
+  <text x="850" y="196" font-size="10.5" font-weight="bold" fill="#1a7f37" text-anchor="middle">+ filament CUTTER at the toolhead</text>
+  <text x="850" y="211" font-size="9.5" fill="#1a7f37" text-anchor="middle">clean square tip — no molten-tip shaping,</text>
+  <text x="850" y="224" font-size="9.5" fill="#1a7f37" text-anchor="middle">unload becomes trivial and repeatable</text>
+
+  <!-- arrows -->
+  <line x1="93" y1="145" x2="228" y2="122" stroke="#555" stroke-width="1.6" marker-end="url(#ar2)"/>
+  <line x1="151" y1="222" x2="228" y2="234" stroke="#555" stroke-width="1.6" marker-end="url(#ar2)"/>
+  <line x1="392" y1="126" x2="416" y2="138" stroke="#555" stroke-width="1.6" marker-end="url(#ar2)"/>
+  <line x1="506" y1="143" x2="538" y2="158" stroke="#555" stroke-width="1.6" marker-end="url(#ar2)"/>
+  <line x1="392" y1="236" x2="538" y2="222" stroke="#555" stroke-width="1.6" marker-end="url(#ar2)"/>
+  <line x1="588" y1="190" x2="618" y2="190" stroke="#555" stroke-width="1.6" marker-end="url(#ar2)"/>
+  <line x1="708" y1="190" x2="748" y2="190" stroke="#555" stroke-width="1.6" marker-end="url(#ar2)"/>
+
+  <!-- bracketing note -->
+  <path d="M461,168 C480,255 620,262 663,215" fill="none" stroke="#8250df" stroke-width="1.4" stroke-dasharray="5 4"/>
+  <text x="520" y="292" font-size="11" font-weight="bold" fill="#8250df" text-anchor="middle">two sensors BRACKET the splitter:</text>
+  <text x="520" y="307" font-size="10" fill="#8250df" text-anchor="middle">tip hand-off through the merge is confirmed in both directions</text>
+  <text x="520" y="320" font-size="10" fill="#8250df" text-anchor="middle">(load AND unload become sensor-confirmed, never distance-guessed)</text>
+
+  <!-- principles -->
+  <rect x="20" y="350" width="930" height="62" rx="8" fill="#f6f8fa" stroke="#57606a" stroke-width="1.2"/>
+  <text x="35" y="372" font-size="11.5" font-weight="bold" fill="#24292f">Principles that made the tested rig work — and generalize:</text>
+  <text x="35" y="390" font-size="10.5" fill="#24292f">sensors at DETERMINED positions · path lengths MEASURED once (tail = distance + margin) · every assisted move BOUNDED with a deadline ·</text>
+  <text x="35" y="404" font-size="10.5" fill="#24292f">motion signal read during every assisted move (slip vs advance) · a parked lane never pushes · one change at a time when testing</text>
+</svg>

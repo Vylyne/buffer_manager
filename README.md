@@ -14,9 +14,30 @@ Both at the same time, over a single USB cable (+ 24 V motor power) — somethin
 
 ---
 
+## The bigger picture — multicolor with just buffers
+
+This firmware is one brick of a larger goal: **multicolor / multi-material
+printing on a single direct-drive toolhead without a selector MMU** — no
+ERCF, no BoxTurtle, no AMS. One LLL Plus buffer per filament lane, a passive
+splitter, Klipper orchestrating lane roles. Two lanes ran in production on
+the reference setup, including real prints with color changes; a fully
+automatic load/unload pipeline was prototyped end-to-end and worked, then
+was withdrawn — held back by missing *equipment* (toolhead cutter, passive
+respoolers), not by the concept.
+
+![Reference rig](docs/img/architecture_tested.svg)
+
+**Read the full story — objective, what was proven, what held us back, and
+why an equipped, clean installation makes LLL-only multicolor entirely
+feasible:** [docs/THE_PROJECT_STORY.en.md](docs/THE_PROJECT_STORY.en.md)
+([FR](docs/THE_PROJECT_STORY.fr.md)) · method details:
+[docs/MULTICOLOR_STATUS.en.md](docs/MULTICOLOR_STATUS.en.md).
+
+---
+
 ## What's new — "Canonical v1, runtime-toggleable" (v1.0.0 of this repo)
 
-The autonomous smart-buffer core is **unchanged** (standalone parity: same hall conventions, same TMC2208 `VACTUAL` drive, same feed behaviour — a board that is never spoken to feeds exactly like before, buttons included). Everything below is added **on top**:
+The autonomous smart-buffer core is **unchanged** (same hall conventions, same TMC2208 `VACTUAL` drive, same feed behaviour, buttons included) — with one deliberate exception: after a hard MCU reset, autonomous feeding waits for the host or 20 s (safety fix #9, see [Known behaviour](#known-behaviour--limitations)). Everything below is added **on top**:
 
 - **11 runtime-toggleable functions** (`LLL_ENABLE`): FEED, BUTTONS, MBSIG, ENTRANCE, TMC, MOVE, DIAG, LED, ADC, TELEM, IOEXT — **one flash**, everything selectable at runtime. No more rebuilding to change behaviour.
 - **Roles per lane**: `active` / `parked` / `standby`. A parked lane **never auto-feeds forward** (multi-lane safety) but still follows a rewind; standby is fully frozen. `LLL_SET_IDLE` is kept as a backwards-compatible alias.
@@ -246,7 +267,7 @@ Re-plug USB and confirm Katapult enumerates: `ls /dev/serial/by-id/` → `usb-ka
 Clone this repo onto the host (all following steps reference it by absolute path — you are still in `~/katapult` at this point, so relative paths would break):
 
 ```bash
-git clone https://github.com/Nitrooxyde/REPO-NAME.git ~/lll-firmware   # replace REPO-NAME (set at publication)
+git clone https://github.com/Nitrooxyde/Mellow-LLL-Plus-Canonical.git ~/lll-firmware
 cd ~/lll-firmware
 ```
 
