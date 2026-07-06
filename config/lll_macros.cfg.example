@@ -1,0 +1,176 @@
+# LLL / AFC host macros — example (reference-setup, working as-is with the
+# shipped extra and dashboard). Copy into your printer.cfg (or include it),
+# adapt the lanes registry in _AFC_VARS to your lane/sensor names.
+# Recipe to add lane N is in the header comment below.
+#
+# PREREQUISITES (adapt before use):
+# 1. A Mainsail/Fluidd-style PAUSE wrapper providing PAUSE_BASE, with one
+#    extra variable used by the temp handover — add this line inside your
+#    [gcode_macro PAUSE] section:
+#        variable_paused_extruder_target: 0
+#    (without it, _AFC_DO_SWAP errors out BEFORE pausing).
+# 2. An extruder-entry filament sensor (one [filament_switch_sensor] at the
+#    extruder inlet). Set its name in _AFC_VARS.entry_sensor below — the
+#    temp handover (_AFC_TEMP_WATCH) reads it to know when the old filament
+#    has left the melt zone.
+# 3. One [filament_switch_sensor <lane>_entrance] per lane, matching the
+#    lanes registry in _AFC_VARS.
+#####################################################################
+#   AFC MULTICOLOR v3 — orchestrateur + swap enfichable + multi-matiere
+#   RECETTE +1 lane : printer.cfg [mcu LLL_PLUS_3]+[filament_switch_sensor lll3_entrance] ;
+#     _AFC_VARS.lanes += 'lll3':'lll3_entrance' ; [gcode_macro T2] gcode: _COLOR_CHANGE LANE=lll3
+#####################################################################
+[gcode_macro _AFC_VARS]
+variable_lanes: {'lll': 'lll_entrance', 'lll2': 'lll2_entrance'}
+variable_active: 'lll'
+variable_entry_sensor: 'O2_sensor'   # YOUR extruder-entry filament sensor name
+variable_next_temp: 0
+variable_cc_pause: 0
+variable_hardcap_s: 10800
+gcode:
+
+[gcode_macro SET_NEXT_TEMP]
+gcode:
+    SET_GCODE_VARIABLE MACRO=_AFC_VARS VARIABLE=next_temp VALUE={params.TEMP|default(0)|int}
+
+[gcode_macro SET_ACTIVE_LANE]
+gcode:
+    {% set tgt = params.LANE|lower %}
+    {% set lanes = printer["gcode_macro _AFC_VARS"].lanes %}
+    {% if tgt not in lanes %}{ action_raise_error("lane inconnue: " ~ tgt) }{% endif %}
+    {% for lane, sensor in lanes.items() %}
+        SET_FILAMENT_SENSOR SENSOR={sensor} ENABLE={ 1 if lane == tgt else 0 }
+        LLL_SET_IDLE LANE={lane} VALUE={ 0 if lane == tgt else 1 }
+    {% endfor %}
+    SET_GCODE_VARIABLE MACRO=_AFC_VARS VARIABLE=active VALUE="'{tgt}'"
+
+[delayed_gcode _LLL_INIT]
+initial_duration: 2
+gcode:
+    SET_ACTIVE_LANE LANE={printer["gcode_macro _AFC_VARS"].active}
+
+[gcode_macro _AFC_START]
+gcode:
+    {% set t = params.TOOL|default(0)|int %}
+    {% set order = printer["gcode_macro _AFC_VARS"].lanes.keys()|list %}
+    {% if t < order|length %}
+        SET_ACTIVE_LANE LANE={order[t]}
+        # FILAMENT CHECK opt-in (SAVE_VARIABLE VARIABLE=lll_filament_check VALUE=1/0) :
+        # sonde la lane physiquement chargee (bras LLL) et PAUSE si discordance
+        {% if printer.save_variables.variables.lll_filament_check|default(0)|int == 1 %}
+            LLL_DETECT_LOADED EXPECTED={order[t]} ON_MISMATCH=pause
+        {% endif %}
+    {% else %}{ action_raise_error("Outil de depart T" ~ t ~ " hors registre") }{% endif %}
+
+[gcode_macro _COLOR_CHANGE]
+gcode:
+    {% set lane = params.LANE|lower %}
+    {% if lane == printer["gcode_macro _AFC_VARS"].active %}
+        RESPOND MSG="Lane {lane} deja active - aucun change"
+    {% else %}
+        SET_ACTIVE_LANE LANE={lane}
+        {% if printer.print_stats.state == "printing" %}_AFC_DO_SWAP LANE={lane}
+        {% else %}RESPOND MSG="Lane de depart = {lane} (hors print)"{% endif %}
+    {% endif %}
+
+[gcode_macro _AFC_DO_SWAP]
+gcode:
+    {% set nt = printer["gcode_macro _AFC_VARS"].next_temp|int %}
+    {% set tgt = nt if nt > 0 else printer.extruder.target|int %}
+    {% if nt <= 0 %}RESPOND MSG="AFC: pas de SET_NEXT_TEMP -> pas de bascule temp (normal si meme matiere)"{% endif %}
+    SET_GCODE_VARIABLE MACRO=PAUSE VARIABLE=paused_extruder_target VALUE={tgt}
+    SET_GCODE_VARIABLE MACRO=_AFC_VARS VARIABLE=cc_pause VALUE=1
+    PAUSE_BASE
+    UPDATE_DELAYED_GCODE ID=_AFC_TEMP_WATCH DURATION=2
+    UPDATE_DELAYED_GCODE ID=_AFC_PAUSE_HARDCAP DURATION={printer["gcode_macro _AFC_VARS"].hardcap_s|int}
+    M83
+    G1 E-1.0 F2100
+    {% if printer.gcode_move.absolute_extrude|lower == 'true' %} M82 {% endif %}
+    G90
+    {% set zmax = printer.toolhead.axis_maximum.z|float %}
+    {% set zcur = printer.toolhead.position.z|float %}
+    {% set z = [zcur + 20.0, zmax - 5]|min %}
+    {% if z > zcur %} G1 Z{z} F900 {% endif %}
+    G1 X3 Y20 F6000
+    RESPOND MSG="CHANGE vers {params.LANE}: rewind + forward + extrude, puis RESUME"
+
+[delayed_gcode _AFC_TEMP_WATCH]
+gcode:
+    {% if printer.print_stats.state == "paused" %}
+        UPDATE_DELAYED_GCODE ID=_AFC_TEMP_WATCH DURATION=2
+        {% set nt = printer["gcode_macro _AFC_VARS"].next_temp|int %}
+        {% set es = printer["gcode_macro _AFC_VARS"].entry_sensor %}
+        {% if nt > 0 and not printer["filament_switch_sensor " ~ es].filament_detected %}
+            M104 S{nt}
+            SET_GCODE_VARIABLE MACRO=_AFC_VARS VARIABLE=next_temp VALUE=0
+            RESPOND MSG="Vieux filament sorti -> buse vers {nt}C"
+        {% endif %}
+    {% else %}
+        SET_GCODE_VARIABLE MACRO=_AFC_VARS VARIABLE=cc_pause VALUE=0
+        UPDATE_DELAYED_GCODE ID=_AFC_PAUSE_HARDCAP DURATION=0
+    {% endif %}
+
+[delayed_gcode _AFC_PAUSE_HARDCAP]
+gcode:
+    {% if printer.print_stats.state == "paused" %}
+        UPDATE_DELAYED_GCODE ID=_AFC_TEMP_WATCH DURATION=0
+        SET_GCODE_VARIABLE MACRO=_AFC_VARS VARIABLE=next_temp VALUE=0
+        TURN_OFF_HEATERS
+        M84
+        SET_GCODE_VARIABLE MACRO=_AFC_VARS VARIABLE=cc_pause VALUE=0
+        RESPOND TYPE=error MSG="Pause change-couleur > 3h : tout coupe, non reprenable (securite)."
+    {% endif %}
+
+[gcode_macro T0]
+gcode: _COLOR_CHANGE LANE=lll
+[gcode_macro T1]
+gcode: _COLOR_CHANGE LANE=lll2
+
+#####################################################################
+# LLL PANEL — panneau lanes DANS Mainsail (dialog interactif natif)
+# Auto-découverte via _AFC_VARS.lanes : toute nouvelle lane apparaît
+# automatiquement. Bouton LLL_PANEL dans le panneau Macros = le menu.
+# Chaque action ferme, exécute, re-questionne les lanes et ré-ouvre.
+#####################################################################
+[gcode_macro LLL_PANEL]
+description: Panneau LLL - etats des lanes + actions
+gcode:
+    {% set vars = printer["gcode_macro _AFC_VARS"] %}
+    {% set active = vars.active %}
+    RESPOND TYPE=command MSG="action:prompt_begin LLL - Lanes filament"
+    {% for lane in vars.lanes.keys() %}
+        {% set s = printer["lll_buffer " ~ lane] %}
+        {% set f = s.filament %}
+        {% set icon = 'ACTIVE' if s.role == 'active' else ('parked' if s.role == 'parked' else 'standby') %}
+        {% set fil = (f.type ~ ' ' ~ f.color) if f and f.type else 'filament non renseigne' %}
+        {% set spool = (' | bobine ' ~ f.spool_id) if f and f.spool_id else '' %}
+        {% set err = (' | !! ERREUR: ' ~ s.ecode) if s.error else '' %}
+        RESPOND TYPE=command MSG="action:prompt_text [{icon}] {lane} : {fil}{spool} | mode {s.mode} | fil {'present' if s.present else 'ABSENT'}{err}"
+        {% if lane != active %}
+            RESPOND TYPE=command MSG="action:prompt_button Activer {lane}|_LLL_PANEL_DO ACT=swap LANE={lane}|primary"
+        {% endif %}
+        {% if s.error %}
+            RESPOND TYPE=command MSG="action:prompt_button Debloquer {lane}|_LLL_PANEL_DO ACT=clear LANE={lane}|error"
+        {% endif %}
+    {% endfor %}
+    RESPOND TYPE=command MSG="action:prompt_footer_button Sonde|_LLL_PANEL_DO ACT=probe|secondary"
+    RESPOND TYPE=command MSG="action:prompt_footer_button Rafraichir|_LLL_PANEL_DO ACT=none|info"
+    RESPOND TYPE=command MSG="action:prompt_footer_button Fermer|RESPOND TYPE=command MSG=action:prompt_end|warning"
+    RESPOND TYPE=command MSG="action:prompt_show"
+
+[gcode_macro _LLL_PANEL_DO]
+description: Action du panneau LLL puis re-affichage avec etat frais
+gcode:
+    RESPOND TYPE=command MSG="action:prompt_end"
+    {% if params.ACT == 'swap' %}
+        SET_ACTIVE_LANE LANE={params.LANE}
+    {% elif params.ACT == 'clear' %}
+        LLL_CLEAR_ERROR LANE={params.LANE}
+    {% elif params.ACT == 'probe' %}
+        LLL_DETECT_LOADED
+    {% endif %}
+    # re-questionne chaque lane (met a jour get_status immediatement)
+    {% for l in printer["gcode_macro _AFC_VARS"].lanes.keys() %}
+        LLL_QUERY LANE={l}
+    {% endfor %}
+    LLL_PANEL

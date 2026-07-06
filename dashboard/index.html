@@ -1,0 +1,443 @@
+<!DOCTYPE html>
+<html lang="fr">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>LLL Lanes</title>
+<style>
+* { margin:0; padding:0; box-sizing:border-box; }
+body {
+    background:#030306; color:#fff;
+    font-family:'Segoe UI', system-ui, -apple-system, sans-serif;
+    padding:8px; min-height:100vh;
+}
+.hdr { display:flex; align-items:center; justify-content:space-between; margin-bottom:8px; }
+.hdr h1 { font-size:13px; color:#ffd700; letter-spacing:1px;
+    text-shadow:0 0 7px rgba(255,215,0,.6); }
+.conn { font-size:9px; padding:2px 8px; border-radius:10px; border:1px solid; }
+.conn.ok  { color:#00ff88; border-color:#00ff8855; }
+.conn.ko  { color:#f44336; border-color:#f4433655; animation:blink 1s infinite; }
+@keyframes blink { 50% { opacity:.4; } }
+.grid { display:grid; grid-template-columns:repeat(auto-fill,minmax(200px,1fr)); gap:8px; }
+.card {
+    background:rgba(6,6,10,.85); backdrop-filter:blur(12px);
+    border:1px solid rgba(255,255,255,.06); border-radius:8px;
+    padding:8px; box-shadow:0 8px 32px rgba(0,0,0,.4);
+    transition:border-color .3s;
+}
+.card.active  { border-color:#00ff8866; box-shadow:0 0 12px rgba(0,255,136,.15), 0 8px 32px rgba(0,0,0,.4); }
+.card.error   { border-color:#f44336aa; box-shadow:0 0 14px rgba(244,67,54,.25); }
+.crow { display:flex; align-items:center; gap:8px; }
+.swatch {
+    width:26px; height:26px; border-radius:50%; flex-shrink:0;
+    border:2px solid rgba(255,255,255,.25);
+    box-shadow:0 0 8px rgba(0,0,0,.6), inset 0 0 6px rgba(0,0,0,.35);
+}
+.lname { font-size:14px; font-weight:bold; }
+.role { font-size:8px; padding:1px 7px; border-radius:8px; border:1px solid;
+    text-transform:uppercase; letter-spacing:.5px; margin-left:auto; }
+.role.active  { color:#00ff88; border-color:#00ff88; text-shadow:0 0 6px #00ff8899; }
+.role.parked  { color:#ff9800; border-color:#ff980088; }
+.role.standby { color:#888;    border-color:#555; }
+.fil { font-size:11px; color:#ccc; margin:7px 0 2px; }
+.fil .dim { color:#777; font-size:9px; }
+.meta { display:flex; gap:10px; font-size:9px; color:#888; margin-bottom:7px; flex-wrap:wrap; }
+.dot { display:inline-block; width:7px; height:7px; border-radius:50%; margin-right:3px; vertical-align:middle; }
+.arm { display:flex; gap:4px; align-items:center; font-size:8px; color:#666; }
+.seg { width:16px; height:8px; border-radius:2px; background:#15151d; border:1px solid #26262f; }
+.seg.lit { background:#00d4ff33; border-color:#00d4ff; box-shadow:0 0 6px #00d4ff66; }
+.errbox { background:#f4433615; border:1px solid #f4433666; border-radius:4px;
+    color:#ff8a80; font-size:9px; padding:3px 7px; margin-bottom:6px; }
+.btns { display:flex; gap:5px; flex-wrap:wrap; }
+button {
+    background:rgba(255,255,255,.04); color:#bbb; font-size:9px;
+    border:1px solid rgba(255,255,255,.13); border-radius:4px;
+    padding:3px 9px; cursor:pointer; transition:all .15s;
+}
+button:hover { color:#fff; border-color:#00d4ff; box-shadow:0 0 6px #00d4ff44; }
+button.act:hover { border-color:#00ff88; box-shadow:0 0 6px #00ff8844; }
+button.warn:hover { border-color:#f44336; box-shadow:0 0 6px #f4433666; }
+button:disabled { opacity:.3; cursor:default; box-shadow:none; }
+button.held { color:#fff; border-color:#00d4ff; box-shadow:0 0 10px #00d4ff88; background:rgba(0,212,255,.12); }
+.transport { display:inline-flex; gap:3px; margin-right:4px; }
+.tbtn { width:42px; padding:4px 0; font-size:13px; text-align:center; letter-spacing:-1px; }
+.tbtn.play.on { color:#00ff88; border-color:#00ff88; box-shadow:0 0 10px #00ff8866;
+    background:rgba(0,255,136,.10); text-shadow:0 0 6px #00ff8899; opacity:1; }
+.tbtn.play.paused { color:#ffd700; border-color:#ffd700; box-shadow:0 0 10px #ffd70066;
+    background:rgba(255,215,0,.10); text-shadow:0 0 6px #ffd70099; opacity:1; }
+button.latched { color:#fff; border-color:#00d4ff; background:rgba(0,212,255,.18);
+    box-shadow:0 0 12px #00d4ffaa; animation:pulsea 1.2s ease-in-out infinite; }
+button.hold { user-select:none; -webkit-user-select:none; touch-action:none; }
+.editf { display:none; margin-top:7px; padding-top:7px; border-top:1px solid #1a1a22; }
+.editf.open { display:grid; grid-template-columns:1fr 1fr; gap:5px; }
+.editf input {
+    background:#0c0c14; color:#eee; font-size:10px; padding:4px 6px;
+    border:1px solid #26262f; border-radius:4px; width:100%;
+}
+.editf input:focus { outline:none; border-color:#ffd700; }
+.editf .full { grid-column:1 / -1; }
+.foot { margin-top:8px; font-size:8px; color:#555; display:flex; justify-content:space-between; }
+.pulse { animation:pulsea 1.2s ease-in-out infinite; }
+@keyframes pulsea { 50% { opacity:.45; } }
+@media (prefers-reduced-motion: reduce) { * { animation-duration:.01ms !important; } }
+</style>
+</head>
+<body>
+<div class="hdr">
+    <h1>⬢ LLL LANES</h1>
+    <span id="conn" class="conn ko">connexion…</span>
+</div>
+<div class="grid" id="grid"></div>
+<div class="foot">
+    <span id="active-info"></span>
+    <span id="print-info"></span>
+</div>
+
+<script>
+'use strict';
+// ================= I18N (suit la langue de Mainsail, fallback navigateur) ==
+const I18N = {
+ fr: { live:'live', reconn:'reconnexion…',
+  filUnknown:'filament non renseigné — ✎ pour éditer',
+  present:'fil présent', absent:'fil ABSENT', mode:'mode', motor:'moteur',
+  feed:'feed', arm:'bras', zoneFree:'entre zones', zoneSlack:'mou',
+  zoneMid:'équilibre', zoneTaut:'tendu', ttSlack:'mou (demande rembobinage)',
+  ttMid:'équilibre', ttTaut:'tendu (demande feed)',
+  ttRw:'maintenir : rembobine · double-clic : continu · clic : stop',
+  ttFw:'maintenir : avance · double-clic : continu · clic : stop',
+  ttPlayActivate:'activer cette lane (auto-feed)',
+  ttPlayPause:'lane active — clic : PAUSE (gel)',
+  ttPlayResume:'lane en pause — clic : reprendre',
+  unlock:'débloquer', edit:'éditer le filament',
+  phType:'matière (ASA-CF)', phColor:'couleur (noir)',
+  phTemp:'temp °C (registre)', phSpool:'n° bobine Spoolman (pastille+conso)',
+  save:'enregistrer → LLL_FILAMENT', err:'moteur stoppé',
+  activeLane:'lane active :', print:'print :', gcodeRefused:'GCODE refusé : ' },
+ en: { live:'live', reconn:'reconnecting…',
+  filUnknown:'no filament set — ✎ to edit',
+  present:'filament present', absent:'filament ABSENT', mode:'mode',
+  motor:'motor', feed:'feed', arm:'arm', zoneFree:'between zones',
+  zoneSlack:'slack', zoneMid:'balanced', zoneTaut:'taut',
+  ttSlack:'slack (rewind needed)', ttMid:'balanced', ttTaut:'taut (feed needed)',
+  ttRw:'hold: rewind · double-click: continuous · click: stop',
+  ttFw:'hold: feed · double-click: continuous · click: stop',
+  ttPlayActivate:'activate this lane (auto-feed)',
+  ttPlayPause:'lane active — click: PAUSE (freeze)',
+  ttPlayResume:'lane paused — click: resume',
+  unlock:'clear error', edit:'edit filament',
+  phType:'material (ASA-CF)', phColor:'color (black)',
+  phTemp:'temp °C (registry)', phSpool:'Spoolman spool # (swatch+usage)',
+  save:'save → LLL_FILAMENT', err:'motor stopped',
+  activeLane:'active lane:', print:'print:', gcodeRefused:'GCODE refused: ' }
+};
+let LANG = 'fr';
+const t = k => (I18N[LANG] && I18N[LANG][k]) || I18N.en[k] || k;
+// ================= MOONRAKER WEBSOCKET (JSON-RPC, zéro CORS) =============
+// via le proxy nginx de Mainsail : même origin, zéro CORS
+const WS_URL = (location.protocol === 'https:' ? 'wss://' : 'ws://')
+               + location.host + '/websocket';
+let ws = null, msgId = 1;
+const pending = new Map();
+let lanes = {};              // 'lll' -> status object
+let laneNames = [];
+let spoolColors = {};        // spool_id -> hex
+let printState = '';
+
+const COLOR_MAP = {          // fallback si pas de bobine Spoolman
+    noir:'#1a1a1a', black:'#1a1a1a', blanc:'#e8e8e8', white:'#e8e8e8',
+    rouge:'#cc2222', red:'#cc2222', bleu:'#2266cc', blue:'#2266cc',
+    vert:'#22aa44', green:'#22aa44', jaune:'#e0c020', yellow:'#e0c020',
+    orange:'#ff8800', gris:'#888888', grey:'#888888', gray:'#888888',
+    violet:'#8844cc', purple:'#8844cc', rose:'#ee66aa', pink:'#ee66aa',
+    marron:'#7a4a22', brown:'#7a4a22', or:'#d4af37', gold:'#d4af37',
+    argent:'#b8b8c0', silver:'#b8b8c0', transparent:'#9ad0d020', natural:'#d8cfa8'
+};
+
+function rpc(method, params) {
+    return new Promise((resolve, reject) => {
+        if (!ws || ws.readyState !== 1) { reject(new Error('ws down')); return; }
+        const id = msgId++;
+        pending.set(id, { resolve, reject });
+        ws.send(JSON.stringify({ jsonrpc:'2.0', method, params: params || {}, id }));
+        setTimeout(() => { if (pending.has(id)) { pending.delete(id); reject(new Error('timeout')); } }, 8000);
+    });
+}
+
+function connect() {
+    ws = new WebSocket(WS_URL);
+    ws.onopen = async () => {
+        setConn(true);
+        try {
+            try {
+                const g = await rpc('server.database.get_item',
+                    { namespace: 'mainsail', key: 'general' });
+                LANG = ((g.value || {}).language || '').startsWith('fr') ? 'fr' : 'en';
+            } catch (e) {
+                LANG = (navigator.language || 'en').startsWith('fr') ? 'fr' : 'en';
+            }
+            const list = await rpc('printer.objects.list');
+            laneNames = list.objects.filter(o => o.startsWith('lll_buffer '))
+                                    .map(o => o.split(' ')[1]);
+            const subs = { print_stats: null };
+            laneNames.forEach(n => subs['lll_buffer ' + n] = null);
+            const r = await rpc('printer.objects.subscribe', { objects: subs });
+            applyStatus(r.status);
+            buildCards();
+            render();
+            refreshSpoolColors();
+        } catch (e) { console.error(e); }
+    };
+    ws.onclose = () => { setConn(false); setTimeout(connect, 3000); };
+    ws.onerror = () => ws.close();
+    ws.onmessage = (ev) => {
+        const m = JSON.parse(ev.data);
+        if (m.id && pending.has(m.id)) {
+            const p = pending.get(m.id); pending.delete(m.id);
+            m.error ? p.reject(new Error(m.error.message)) : p.resolve(m.result);
+            return;
+        }
+        if (m.method === 'notify_status_update') { applyStatus(m.params[0]); render(); }
+        if (m.method === 'notify_klippy_disconnected') setConn(false);
+        if (m.method === 'notify_klippy_ready') location.reload();
+    };
+}
+
+function applyStatus(st) {
+    for (const [k, v] of Object.entries(st)) {
+        if (k.startsWith('lll_buffer ')) {
+            const n = k.split(' ')[1];
+            lanes[n] = Object.assign(lanes[n] || {}, v);
+        }
+        if (k === 'print_stats' && v.state !== undefined) printState = v.state;
+    }
+}
+
+function setConn(ok) {
+    const el = document.getElementById('conn');
+    el.className = 'conn ' + (ok ? 'ok' : 'ko');
+    el.textContent = ok ? t('live') : t('reconn');
+}
+
+async function refreshSpoolColors() {
+    for (const n of laneNames) {
+        const sid = (lanes[n]?.filament || {}).spool_id;
+        if (!sid || spoolColors[sid]) continue;
+        try {
+            const sp = await rpc('server.spoolman.proxy',
+                { request_method:'GET', path:'/v1/spool/' + sid });
+            const hex = sp?.filament?.color_hex;
+            if (hex) { spoolColors[sid] = '#' + hex.replace('#',''); }
+        } catch (e) { /* spoolman absent : fallback nom de couleur */ }
+    }
+    render();
+}
+
+function gcode(script) {
+    rpc('printer.gcode.script', { script }).catch(e => alert(t('gcodeRefused') + e.message));
+}
+
+// ================= UI =====================================================
+function swatchColor(lane) {
+    const f = lane.filament || {};
+    if (f.spool_id && spoolColors[f.spool_id]) return spoolColors[f.spool_id];
+    const c = (f.color || '').toLowerCase().trim();
+    return COLOR_MAP[c] || '#3a3a46';
+}
+
+function buildCards() {
+    const g = document.getElementById('grid');
+    g.innerHTML = '';
+    laneNames.forEach(n => {
+        const d = document.createElement('div');
+        d.className = 'card'; d.id = 'card-' + n;
+        d.innerHTML = `
+        <div class="crow">
+            <div class="swatch" id="sw-${n}"></div>
+            <span class="lname">${n}</span>
+            <span class="role" id="role-${n}"></span>
+        </div>
+        <div class="fil" id="fil-${n}"></div>
+        <div class="errbox" id="err-${n}" style="display:none"></div>
+        <div class="meta">
+            <span id="pres-${n}"></span>
+            <span id="mode-${n}"></span>
+            <span class="arm">${t('arm')}
+                <span class="seg" id="a1-${n}" title="${t('ttSlack')}"></span>
+                <span class="seg" id="a2-${n}" title="${t('ttMid')}"></span>
+                <span class="seg" id="a4-${n}" title="${t('ttTaut')}"></span>
+                <span id="az-${n}" style="color:#8ab"></span>
+            </span>
+        </div>
+        <div class="btns">
+            <span class="transport">
+                <button class="hold tbtn" id="jb-${n}" title="${t('ttRw')}">◂◂</button>
+                <button class="tbtn play" id="go-${n}">▶⏸</button>
+                <button class="hold tbtn" id="jf-${n}" title="${t('ttFw')}">▸▸</button>
+            </span>
+            <button class="warn" id="clr-${n}" onclick="gcode('LLL_CLEAR_ERROR LANE=${n}')">${t('unlock')}</button>
+            <button title="${t('edit')}" onclick="toggleEdit('${n}')">✎</button>
+        </div>
+        <div class="editf" id="ed-${n}">
+            <input id="et-${n}" placeholder="${t('phType')}">
+            <input id="ec-${n}" placeholder="${t('phColor')}">
+            <input id="ep-${n}" placeholder="${t('phTemp')}" type="number">
+            <input id="es-${n}" placeholder="${t('phSpool')}" type="number">
+            <button class="full act" onclick="saveFil('${n}')">${t('save')}</button>
+        </div>`;
+        g.appendChild(d);
+        bindTransport(document.getElementById('jf-' + n), n, 'fwd');
+        bindTransport(document.getElementById('jb-' + n), n, 'back');
+        bindPlay(document.getElementById('go-' + n), n);
+    });
+}
+
+// ============ TRANSPORT façon magnétoscope ============
+// maintien = bouge tant que tenu · double-clic = continu (latch) ·
+// clic simple = stop · play = activer / pause(gel) / reprendre
+// Sécurité : chaque ordre jog est borné 10 s côté firmware — si le
+// navigateur meurt en plein latch, le moteur s'arrête seul en <10 s.
+const jstate = {};
+function jogSend(lane, dir) { gcode('LLL_JOG LANE=' + lane + ' DIR=' + dir + ' MS=10000'); }
+function jogStop(lane) { gcode('LLL_JOG LANE=' + lane + ' DIR=stop MS=0'); }
+function stopLatch(lane) {
+    const j = jstate[lane];
+    if (!j) return;
+    if (j.iv) { clearInterval(j.iv); j.iv = null; }
+    if (j.latched) {
+        j.latched = null;
+        jogStop(lane);
+        ['jf', 'jb'].forEach(pfx => {
+            const b = document.getElementById(pfx + '-' + lane);
+            if (b) b.classList.remove('latched', 'held');
+        });
+    }
+}
+function bindTransport(btn, lane, dir) {
+    jstate[lane] = jstate[lane] || {};
+    const j = jstate[lane];
+    btn.addEventListener('pointerdown', (e) => {
+        e.preventDefault();
+        if (j.latched) {                 // un latch tourne : clic = STOP
+            stopLatch(lane);
+            j.consumed = true;
+            return;
+        }
+        j.consumed = false;
+        j.downT = Date.now();
+        jogSend(lane, dir);
+        j.iv = setInterval(() => jogSend(lane, dir), 3000);
+        btn.classList.add('held');
+    });
+    const up = () => {
+        if (j.consumed) { j.consumed = false; return; }
+        if (!j.downT) return;
+        const dur = Date.now() - j.downT;
+        j.downT = null;
+        if (j.iv) { clearInterval(j.iv); j.iv = null; }
+        btn.classList.remove('held');
+        const now = Date.now();
+        if (dur < 300 && j.lastDir === dir && now - (j.lastClick || 0) < 450) {
+            j.latched = dir;             // double-clic → continu
+            j.lastClick = 0;
+            jogSend(lane, dir);
+            j.iv = setInterval(() => jogSend(lane, dir), 3000);
+            btn.classList.add('latched');
+        } else {
+            jogStop(lane);
+            j.lastClick = now;
+            j.lastDir = dir;
+        }
+    };
+    ['pointerup', 'pointerleave', 'pointercancel'].forEach(ev => btn.addEventListener(ev, up));
+    btn.addEventListener('contextmenu', e => e.preventDefault());
+}
+function bindPlay(btn, lane) {
+    btn.addEventListener('click', () => {
+        stopLatch(lane);                 // play/pause annule tout latch
+        const role = (lanes[lane] || {}).role;
+        if (role === 'active') {
+            gcode('LLL_ROLE LANE=' + lane + ' ROLE=standby');   // PAUSE (gel)
+            lanes[lane].role = 'standby';                       // optimiste :
+            btn.classList.remove('on');                         // jaune direct,
+            btn.classList.add('paused');                        // confirmé au
+        } else if (role === 'standby') {                        // prochain push
+            gcode('LLL_ROLE LANE=' + lane + ' ROLE=active');    // reprise
+            lanes[lane].role = 'active';
+            btn.classList.remove('paused');
+            btn.classList.add('on');
+        } else {
+            gcode('SET_ACTIVE_LANE LANE=' + lane);              // devient active
+        }
+    });
+}
+
+function render() {
+    let activeLane = '';
+    laneNames.forEach(n => {
+        const s = lanes[n]; if (!s) return;
+        const card = document.getElementById('card-' + n); if (!card) return;
+        const f = s.filament || {};
+        if (s.role === 'active') activeLane = n;
+        card.className = 'card' + (s.error ? ' error' : (s.role === 'active' ? ' active' : ''));
+        document.getElementById('sw-' + n).style.background = swatchColor(s);
+        const role = document.getElementById('role-' + n);
+        role.className = 'role ' + s.role; role.textContent = s.role;
+        document.getElementById('fil-' + n).innerHTML = f.type
+            ? `${f.type} <b>${f.color || ''}</b>`
+            : '<span class="dim">' + t('filUnknown') + '</span>';
+        const err = document.getElementById('err-' + n);
+        if (s.error) { err.style.display = 'block'; err.textContent = '⚠ ' + s.ecode + ' — ' + t('err'); }
+        else err.style.display = 'none';
+        document.getElementById('pres-' + n).innerHTML =
+            `<span class="dot" style="background:${s.present ? '#00ff88' : '#f44336'}"></span>${s.present ? t('present') : t('absent')}`;
+        document.getElementById('mode-' + n).textContent = t('mode') + ' ' + s.mode +
+            (s.running ? ' · ▶ ' + t('motor') : '') + (s.feeding ? ' · ' + t('feed') : '');
+        document.getElementById('mode-' + n).className = s.running ? 'pulse' : '';
+        [[1,'a1'],[2,'a2'],[4,'a4']].forEach(([bit, id]) => {
+            document.getElementById(id + '-' + n).className = 'seg' + ((s.arm & bit) ? ' lit' : '');
+        });
+        const zones = [];
+        if (s.arm & 1) zones.push(t('zoneSlack'));
+        if (s.arm & 2) zones.push(t('zoneMid'));
+        if (s.arm & 4) zones.push(t('zoneTaut'));
+        document.getElementById('az-' + n).textContent = zones.length ? zones.join('+') : t('zoneFree');
+        const go = document.getElementById('go-' + n);
+        go.classList.toggle('on', s.role === 'active');
+        go.classList.toggle('paused', s.role === 'standby');
+        go.title = (s.role === 'active') ? t('ttPlayPause')
+                 : (s.role === 'standby') ? t('ttPlayResume')
+                 : t('ttPlayActivate');
+        document.getElementById('clr-' + n).style.display = s.error ? '' : 'none';
+    });
+    document.getElementById('active-info').textContent = activeLane ? (t('activeLane') + ' ' + activeLane) : '';
+    document.getElementById('print-info').textContent = printState ? (t('print') + ' ' + printState) : '';
+}
+
+function toggleEdit(n) {
+    const ed = document.getElementById('ed-' + n);
+    const f = (lanes[n] || {}).filament || {};
+    if (!ed.classList.contains('open')) {
+        document.getElementById('et-' + n).value = f.type || '';
+        document.getElementById('ec-' + n).value = f.color || '';
+        document.getElementById('ep-' + n).value = f.temp || '';
+        document.getElementById('es-' + n).value = f.spool_id || '';
+    }
+    ed.classList.toggle('open');
+}
+
+function saveFil(n) {
+    const v = id => document.getElementById(id + '-' + n).value.trim().replace(/\s+/g, '_');
+    const parts = ['LLL_FILAMENT LANE=' + n];
+    parts.push('TYPE=' + (v('et') || 'inconnu'));
+    parts.push('COLOR=' + (v('ec') || 'inconnu'));
+    if (v('ep')) parts.push('TEMP=' + v('ep'));
+    if (v('es')) parts.push('SPOOL_ID=' + v('es'));
+    gcode(parts.join(' '));
+    document.getElementById('ed-' + n).classList.remove('open');
+    setTimeout(refreshSpoolColors, 800);
+}
+
+connect();
+</script>
+</body>
+</html>

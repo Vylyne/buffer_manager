@@ -1,0 +1,74 @@
+# LLL Plus buffer — example printer.cfg snippets.
+# Copy the sections below into your own printer.cfg (or include this file),
+# then replace the serial placeholder with your board's /dev/serial/by-id path
+# (ls /dev/serial/by-id/ with the board plugged in). One [mcu]+[lll_buffer]
+# pair per board; uncomment the *_2 / lll2 blocks for a second lane.
+
+# --------------------------------------------------------------------------
+# MCU — one section per LLL Plus board
+# --------------------------------------------------------------------------
+[mcu LLL_PLUS]
+serial: /dev/serial/by-id/usb-Klipper_stm32f072xb_XXXXXXXXXXXX-if00
+restart_method: command
+
+# Second board (multi-lane) — uncomment and set its own by-id path:
+#[mcu LLL_PLUS_2]
+#serial: /dev/serial/by-id/usb-Klipper_stm32f072xb_YYYYYYYYYYYY-if00
+#restart_method: command
+
+# --------------------------------------------------------------------------
+# Persistence — REQUIRED for LLL profiles, filament declarations and
+# runtime tweaks to survive restarts (they are replayed on connect).
+# Skip this section if your printer.cfg already has [save_variables].
+# --------------------------------------------------------------------------
+[save_variables]
+filename: ~/printer_data/variables.cfg
+
+# --------------------------------------------------------------------------
+# LLL buffer lanes — one section per board
+# --------------------------------------------------------------------------
+[lll_buffer lll]
+mcu: LLL_PLUS
+role: parked
+#   Recommended: 'parked' closes the boot window where the compiled-in
+#   default (active/auto) could push filament before Klipper's config
+#   arrives. Activate the lane you want after startup with:
+#   LLL_ROLE LANE=lll ROLE=active
+#   Note: this covers Klipper restarts, NOT a hard MCU reset (M112 /
+#   power-cycle) — avoid a tensioned arm + engaged filament during those.
+#feed_mode: auto
+#   Feed mode at startup: auto | semi_auto | semi_manual | manual. Default: auto.
+#   Default: auto.
+#enable:
+#   Comma-separated functions to force ON from the config sequence,
+#   e.g. enable: led, diag
+#   Functions: feed, buttons, mbsig, entrance, tmc, move, diag, led,
+#   adc, telem, ioext. Default: empty (compiled-in defaults).
+#disable:
+#   Comma-separated functions to force OFF, e.g. disable: buttons
+#   Default: empty.
+#poll_interval: 1.5
+#   State refresh / keepalive period in seconds (0.3 - 30). Default: 1.5.
+#event_gcode:
+#   G-code template run on EVERY event pushed by the board (~20-50 ms
+#   reaction). Jinja context: event.name / event.code / event.value /
+#   event.lane. Example — pause the print on a jam:
+#  {% if event.name == 'ecode_set' and event.value == 1 %}
+#    M118 Jam on {event.lane} !
+#    PAUSE
+#  {% endif %}
+
+# Second lane (multi-lane) — uncomment together with [mcu LLL_PLUS_2]:
+#[lll_buffer lll2]
+#mcu: LLL_PLUS_2
+#role: parked
+
+# --------------------------------------------------------------------------
+# Optional: entrance runout -> pause the print
+# The firmware already stops the buffer motor locally on entrance runout
+# (ENTRANCE function). This block additionally pauses the PRINT on the
+# Klipper side using the same switch, exposed as a regular MCU pin.
+# --------------------------------------------------------------------------
+#[filament_switch_sensor lll_entrance]
+#switch_pin: ^!LLL_PLUS:PB7
+#pause_on_runout: True

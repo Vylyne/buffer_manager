@@ -1,0 +1,65 @@
+[menu __main __lll]
+type: list
+name: LLL Buffer
+
+# --------------------------- Lane 1 (lll) ------------------------------------
+[menu __main __lll __l1]
+type: list
+name: L1 {printer['lll_buffer lll'].role|upper}{' !ERR' if printer['lll_buffer lll'].error else ''}
+
+[menu __main __lll __l1 __st]
+type: command
+name: arm{printer['lll_buffer lll'].arm} fil{printer['lll_buffer lll'].present} {printer['lll_buffer lll'].ecode}
+gcode:
+    LLL_QUERY LANE=lll
+
+[menu __main __lll __l1 __act]
+type: command
+name: > Activer (auto-feed)
+enable: {printer.print_stats.state != "printing"}
+gcode:
+    LLL_ROLE LANE=lll ROLE=active
+
+[menu __main __lll __l1 __park]
+type: command
+enable: {printer.print_stats.state != "printing"}
+name: > Parker / Hold
+gcode:
+    LLL_ROLE LANE=lll ROLE=parked
+
+[menu __main __lll __l1 __clr]
+type: command
+name: > Effacer erreur
+gcode:
+    LLL_CLEAR_ERROR LANE=lll
+
+# --------------------------- Lane 2 (lll2) -----------------------------------
+[menu __main __lll __l2]
+type: list
+name: L2 {printer['lll_buffer lll2'].role|upper}{' !ERR' if printer['lll_buffer lll2'].error else ''}
+
+[menu __main __lll __l2 __st]
+type: command
+name: arm{printer['lll_buffer lll2'].arm} fil{printer['lll_buffer lll2'].present} {printer['lll_buffer lll2'].ecode}
+gcode:
+    LLL_QUERY LANE=lll2
+
+[menu __main __lll __l2 __act]
+type: command
+name: > Activer (auto-feed)
+enable: {printer.print_stats.state != "printing"}
+gcode:
+    LLL_ROLE LANE=lll2 ROLE=active
+
+[menu __main __lll __l2 __park]
+type: command
+enable: {printer.print_stats.state != "printing"}
+name: > Parker / Hold
+gcode:
+    LLL_ROLE LANE=lll2 ROLE=parked
+
+[menu __main __lll __l2 __clr]
+type: command
+name: > Effacer erreur
+gcode:
+    LLL_CLEAR_ERROR LANE=lll2
