@@ -43,24 +43,40 @@ gcode:
         LLL_SET_IDLE LANE={lane} VALUE={ 0 if lane == tgt else 1 }
     {% endfor %}
     SET_GCODE_VARIABLE MACRO=_AFC_VARS VARIABLE=active VALUE="'{tgt}'"
+    SAVE_VARIABLE VARIABLE=afc_active_lane VALUE='"{tgt}"'
 
+# Restaure la lane active PERSISTEE apres un restart (jamais un defaut en dur :
+# sinon la mauvaise lane peut etre promue active et son auto-feed repousse la
+# pointe parquee dans le Y).
 [delayed_gcode _LLL_INIT]
 initial_duration: 2
 gcode:
-    SET_ACTIVE_LANE LANE={printer["gcode_macro _AFC_VARS"].active}
+    SET_ACTIVE_LANE LANE={printer.save_variables.variables.afc_active_lane|default('lll')}
 
+# Preselection SEULE (roles + armement runout). L'appeler LE PLUS TOT possible :
+# ajoutez TOOL=[initial_tool] a l'appel PRINT_START de votre start G-code machine
+# et faites appeler _AFC_START TOOL= en premiere action de PRINT_START — la lane
+# de l'ancien print est parquee AVANT la chauffe.
 [gcode_macro _AFC_START]
 gcode:
     {% set t = params.TOOL|default(0)|int %}
     {% set order = printer["gcode_macro _AFC_VARS"].lanes.keys()|list %}
     {% if t < order|length %}
         SET_ACTIVE_LANE LANE={order[t]}
-        # FILAMENT CHECK opt-in (SAVE_VARIABLE VARIABLE=lll_filament_check VALUE=1/0) :
-        # sonde la lane physiquement chargee (bras LLL) et PAUSE si discordance
-        {% if printer.save_variables.variables.lll_filament_check|default(0)|int == 1 %}
-            LLL_DETECT_LOADED EXPECTED={order[t]} ON_MISMATCH=pause
-        {% endif %}
     {% else %}{ action_raise_error("Outil de depart T" ~ t ~ " hors registre") }{% endif %}
+
+# FILAMENT CHECK opt-in (SAVE_VARIABLE VARIABLE=lll_filament_check VALUE=1/0).
+# A appeler apres votre dernier M109 et AVANT la ligne de purge (ex. dans la
+# branche reprise de votre RESUME) : sonde la lane physiquement chargee.
+# ON_MISMATCH=error est VOULU : un PAUSE n'arrete pas l'expansion de la macro
+# appelante (la purge s'executerait quand meme) ; l'erreur avorte tout, le
+# print reste en pause -> corrigez la lane -> RESUME rejoue chauffe+check+purge.
+# MM a calibrer sur votre geometrie (30 sur le setup de reference).
+[gcode_macro _AFC_CHECK]
+gcode:
+    {% if printer.save_variables.variables.lll_filament_check|default(0)|int == 1 %}
+        LLL_DETECT_LOADED EXPECTED={printer["gcode_macro _AFC_VARS"].active} ON_MISMATCH=error MM=30
+    {% endif %}
 
 [gcode_macro _COLOR_CHANGE]
 gcode:

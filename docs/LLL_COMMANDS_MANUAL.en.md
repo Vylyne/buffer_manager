@@ -253,10 +253,11 @@ role: parked                # RECOMMENDED for multi-lane: each board starts
 LLL_FILAMENT LANE=lll2 TYPE=ASA COLOR=rouge TEMP=265
 ```
 
-### `LLL_DETECT_LOADED [MM=10] [EXPECTED=<lane>] [ON_MISMATCH=warn|pause]`
+### `LLL_DETECT_LOADED [MM=10] [EXPECTED=<lane>] [ON_MISMATCH=warn|pause|error]`
 **Detects which lane is PHYSICALLY engaged in the extruder** — with no additional sensor: all lanes briefly switch to standby, small extruder retract (`MM`, default 10 mm), **only the engaged lane's arm moves** (its position sensors give it away), clean net-zero re-push, roles restored.
 - ⚠️ **Requires a hot extruder** (≥ `min_extrude_temp`, 170 °C): when cold, Klipper blocks the E movement and the filament is frozen in the nozzle (guaranteed slip) → the command refuses with a clear message.
 - `EXPECTED=` + `ON_MISMATCH=pause`: if the detected lane is not the expected one → **PAUSE** + instruction message (load the correct lane, re-check, `RESUME`).
+- `ON_MISMATCH=error`: same but as a **G-code error** — aborts the queue and the rest of the calling macro. Required to gate a purge line from inside a start/resume macro: a `PAUSE` does not stop macro expansion (the purge would still run with the wrong filament).
 - Inconclusive verdict (no arm / several arms) → reported honestly, never a false positive.
 - The detected lane is remembered (`lll_loaded_lane` in save_variables).
 - `MM` must be calibrated for your geometry: the arm must change zone decisively.
@@ -265,13 +266,15 @@ LLL_FILAMENT LANE=lll2 TYPE=ASA COLOR=rouge TEMP=265
 ```
 SAVE_VARIABLE VARIABLE=lll_filament_check VALUE=1    ; enable (0 = disable)
 ```
-When active, `_AFC_START` (macro provided in `config/lll_macros.cfg.example` — call it from your machine start G-code with `TOOL=[initial_tool]`) probes the loaded lane **after heating** and compares it to the initial tool requested by the slicer:
-- match → `LLL probe: lane 'lll2' chargée — ASA rouge (265C) - concordance OK` → the print continues
-- mismatch → **"FILAMENT CHECK" PAUSE** + message → you load the correct lane → `RESUME`
+Recommended flow (macros provided in `config/lll_macros.cfg.example`), in two steps:
+1. **Pre-select as early as possible**: pass `TOOL=[initial_tool]` to your `PRINT_START` and have it call `_AFC_START TOOL=` as its first action — the print's lane is activated and the previous print's lane is **parked before heating even starts**.
+2. **Check BEFORE the purge**: call `_AFC_CHECK` right after your final `M109`, right before the purge line (`ON_MISMATCH=error`):
+- match → `LLL probe: lane 'lll2' chargée — ASA rouge (265C) - concordance OK` → purge, print
+- mismatch → **"FILAMENT CHECK" error** before a single millimeter is extruded; the print stays paused → load the correct lane → `RESUME` replays heat → check → purge (free retry, clean plate)
 Philosophy: **the function is available, never imposed** — disabled by default; each user enables it to suit their workflow (essential for manual multi-lane loading, pointless for a single lane).
 
 ### Boot note (fix included)
-The `[lll_buffer]` sections must carry `role: parked`: each board starts parked **right from the configuration sequence** (zero window during which a lane would feed by default), then `_LLL_INIT` activates the right lane 2 s after ready. Without it, a restarted board is `active/auto` (compiled-in default) for ~15-40 s.
+The `[lll_buffer]` sections must carry `role: parked`: each board starts parked **right from the configuration sequence** (zero window during which a lane would feed by default), then `_LLL_INIT` restores the **persisted** active lane (`afc_active_lane`, written to save_variables by `SET_ACTIVE_LANE`) 2 s after ready — never a hard-coded default: after a restart, the lane you are not using stays parked. Without it, a restarted board is `active/auto` (compiled-in default) for ~15-40 s.
 ✅ **Hard MCU reset — fixed in the firmware (fix #9, boot grace period)**: after a `FIRMWARE_RESTART`, an M112 or a power-cycle, the board starts **no autonomous motion** until Klipper has spoken to it once (20 s cap) — the compiled-defaults window that used to cause a brief phantom push is closed (field-proven on the reference setup: reset with a fully-tensioned arm → zero motion). Buttons, jog, run and roles stay live during the grace. Deliberate trade-off (not Mellow parity): a board never driven by a host waits 20 s after power-on before auto-feeding, where the stock firmware starts ~1 s after boot. `role: parked` remains recommended as a complementary layer (it also covers a Klipper host staying down > 20 s with a tensioned arm).
 
 ---

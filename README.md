@@ -152,7 +152,7 @@ All commands take `LANE=<lane>` (the `[lll_buffer <lane>]` section name), except
 | `LLL_IO_CFG` | Configure an IOEXT channel (din / dout / soft-PWM / ADC / release) |
 | `LLL_IO_WRITE` | Write an IOEXT dout / PWM duty |
 | `LLL_IO_READ` | Read an IOEXT channel |
-| `LLL_DETECT_LOADED` | **Global**: probe which lane is physically loaded, using only the arm sensors (`EXPECTED=`, `ON_MISMATCH=warn\|pause`) |
+| `LLL_DETECT_LOADED` | **Global**: probe which lane is physically loaded, using only the arm sensors (`EXPECTED=`, `ON_MISMATCH=warn\|pause\|error`) |
 
 Full manual with parameters, examples and pitfalls: **[docs/LLL_COMMANDS_MANUAL.en.md](docs/LLL_COMMANDS_MANUAL.en.md)** (English) · **[docs/COMMANDES_LLL_MANUEL.fr.md](docs/COMMANDES_LLL_MANUEL.fr.md)** (French).
 

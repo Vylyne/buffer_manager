@@ -1,5 +1,31 @@
 # Changelog
 
+## v1.0.1 — Pre-purge filament gating — 2026-07-10
+
+Host-side only (extra + example macros): **no firmware rebuild or flash needed**.
+
+### Added
+- `LLL_DETECT_LOADED ON_MISMATCH=error`: raises a G-code error on mismatch,
+  aborting the queue and the rest of the calling macro. Required to gate a
+  purge line from inside a start/resume macro — a plain `PAUSE` does not stop
+  macro expansion, so the purge would still run with the wrong filament.
+- Example macros: new `_AFC_CHECK` — probes the ACTIVE lane, meant to be
+  called after the final `M109` and before the purge line. Failed check
+  leaves the print paused; `RESUME` replays heat → check → purge (free retry).
+- Example macros: the active lane is now **persisted** (`afc_active_lane` in
+  save_variables) and `_LLL_INIT` restores it after a restart instead of a
+  hard-coded default. Field incident behind this: after a restart the
+  hard-coded default promoted the wrong lane to `active`, and its autonomous
+  auto-feed pushed the parked filament tip back into the Y merger (a parked
+  lane never feeds forward — the fix keeps the unused lane parked).
+
+### Changed
+- Example macros: `_AFC_START` is now pre-selection only (roles + runout
+  arming) and should be called as early as possible (forward
+  `TOOL=[initial_tool]` through your `PRINT_START`), so the previous print's
+  lane is parked before heating. The filament check moved from `_AFC_START`
+  (which ran after the purge) to `_AFC_CHECK` (before the purge).
+
 ## v1.0.0 — "Canonical" (runtime-toggleable) — 2026-07-02
 
 The autonomous smart-buffer core is unchanged (standalone-parity: same hall

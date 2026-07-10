@@ -253,10 +253,11 @@ role: parked                # RECOMMANDÉ multi-lanes : chaque carte démarre
 LLL_FILAMENT LANE=lll2 TYPE=ASA COLOR=rouge TEMP=265
 ```
 
-### `LLL_DETECT_LOADED [MM=10] [EXPECTED=<lane>] [ON_MISMATCH=warn|pause]`
+### `LLL_DETECT_LOADED [MM=10] [EXPECTED=<lane>] [ON_MISMATCH=warn|pause|error]`
 **Détecte quelle lane est PHYSIQUEMENT engagée dans l'extrudeur** — sans aucun capteur supplémentaire : toutes les lanes passent brièvement en standby, petit retract extrudeur (`MM`, déf. 10 mm), **seul le bras de la lane engagée bouge** (ses capteurs de position le trahissent), re-push net zéro, rôles restaurés.
 - ⚠️ **Exige un extrudeur chaud** (≥ `min_extrude_temp`, 170 °C) : à froid, Klipper bloque le mouvement E et le filament est figé dans la buse (slip garanti) → la commande refuse avec un message clair.
 - `EXPECTED=` + `ON_MISMATCH=pause` : si la lane détectée n'est pas celle attendue → **PAUSE** + message d'instructions (charger la bonne lane, re-vérifier, `RESUME`).
+- `ON_MISMATCH=error` : idem mais en **erreur G-code** — avorte la file et le reste de la macro appelante. Indispensable pour gater une purge depuis l'intérieur d'une macro start/resume : un `PAUSE` n'arrête pas l'expansion de la macro (la purge s'exécuterait quand même avec le mauvais filament).
 - Verdict non concluant (aucun/plusieurs bras) → signalé honnêtement, jamais de faux positif.
 - La lane détectée est mémorisée (`lll_loaded_lane` dans save_variables).
 - `MM` est à calibrer sur votre géométrie : il faut que le bras change de zone de façon franche.
@@ -265,13 +266,15 @@ LLL_FILAMENT LANE=lll2 TYPE=ASA COLOR=rouge TEMP=265
 ```
 SAVE_VARIABLE VARIABLE=lll_filament_check VALUE=1    ; activer (0 = désactiver)
 ```
-Quand actif, `_AFC_START` (macro fournie : `config/lll_macros.cfg.example` — à appeler depuis votre start G-code machine avec `TOOL=[initial_tool]`) sonde la lane chargée **après la chauffe** et compare à l'outil initial demandé par le slicer :
-- concordance → `LLL probe: lane 'lll2' chargée — ASA rouge (265C) - concordance OK` → le print continue
-- discordance → **PAUSE « FILAMENT CHECK »** + message → vous chargez la bonne lane → `RESUME`
+Flux recommandé (macros fournies : `config/lll_macros.cfg.example`), en deux temps :
+1. **Présélection au plus tôt** : passez `TOOL=[initial_tool]` à votre `PRINT_START` et faites appeler `_AFC_START TOOL=` en première action — la lane du print est activée et celle de l'ancien print **parquée avant même la chauffe**.
+2. **Check AVANT la purge** : appelez `_AFC_CHECK` juste après votre dernier `M109`, juste avant la ligne de purge (`ON_MISMATCH=error`) :
+- concordance → `LLL probe: lane 'lll2' chargée — ASA rouge (265C) - concordance OK` → purge, print
+- discordance → **erreur « FILAMENT CHECK »** avant d'avoir extrudé quoi que ce soit ; le print reste en pause → chargez la bonne lane → `RESUME` rejoue chauffe → check → purge (retry gratuit, plateau propre)
 Philosophie : **fonction disponible, jamais imposée** — désactivée par défaut, chacun l'active selon son workflow (indispensable en chargement manuel multi-lanes, inutile pour un mono-lane).
 
 ### Note boot (fix intégré)
-Les sections `[lll_buffer]` doivent porter `role: parked` : chaque carte démarre parquée **dès la séquence de configuration** (zéro fenêtre où une lane pousserait par défaut), puis `_LLL_INIT` active la bonne lane 2 s après ready. Sans ça, une carte redémarrée est `active/auto` par défaut compilé pendant ~15-40 s.
+Les sections `[lll_buffer]` doivent porter `role: parked` : chaque carte démarre parquée **dès la séquence de configuration** (zéro fenêtre où une lane pousserait par défaut), puis `_LLL_INIT` restaure la lane active **persistée** (`afc_active_lane`, écrite en save_variables par `SET_ACTIVE_LANE`) 2 s après ready — jamais un défaut en dur : après un restart, la lane que vous n'utilisez pas reste parquée. Sans ça, une carte redémarrée est `active/auto` par défaut compilé pendant ~15-40 s.
 ✅ **Reset MCU franc — corrigé par le firmware (fix #9, grace period)** : après un `FIRMWARE_RESTART`, un M112 ou une coupure d'alimentation, la carte ne démarre **aucun mouvement autonome** tant que Klipper ne lui a pas parlé (plafond 20 s) — la fenêtre « défauts compilés » qui provoquait une brève poussée fantôme est fermée (prouvé sur le setup de référence : reset avec bras tendu → zéro mouvement). Boutons, jog, run et rôles restent actifs pendant la grâce. Compromis assumé (pas une parité Mellow) : une carte jamais pilotée par un hôte attend 20 s au boot avant l'auto-feed, là où le firmware d'origine démarre ~1 s après. `role: parked` reste recommandé en couche complémentaire (couvre aussi un hôte Klipper qui reste indisponible > 20 s bras tendu).
 
 ---

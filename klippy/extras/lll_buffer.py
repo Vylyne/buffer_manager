@@ -643,7 +643,7 @@ class LLLBuffer:
         return (' — ' + s) if s else ''
 
     # ------------------------------------------------------------------
-    # LLL_DETECT_LOADED [MM=10] [EXPECTED=<lane>] [ON_MISMATCH=warn|pause]
+    # LLL_DETECT_LOADED [MM=10] [EXPECTED=<lane>] [ON_MISMATCH=warn|pause|error]
     # Sonde la lane physiquement chargée : toutes lanes en standby, petit
     # retract extrudeur -> SEUL le bras de la lane engagée bouge -> verdict.
     # Exige un extrudeur >= min_extrude_temp (Klipper bloque E-move à froid
@@ -712,6 +712,8 @@ class LLLBuffer:
                              % ', '.join(changed))
 
     def _probe_fail(self, gcmd, action, detail):
+        if action == 'error':
+            raise gcmd.error('FILAMENT CHECK: ' + detail)
         if action == 'pause':
             self.gcode.run_script_from_command("PAUSE")
             gcmd.respond_info(
