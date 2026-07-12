@@ -39,6 +39,8 @@ body {
 .role.active  { color:#00ff88; border-color:#00ff88; text-shadow:0 0 6px #00ff8899; }
 .role.parked  { color:#ff9800; border-color:#ff980088; }
 .role.standby { color:#888;    border-color:#555; }
+.frz { font-size:8px; padding:1px 7px; border-radius:8px; border:1px solid #00d4ff88;
+    color:#00d4ff; text-shadow:0 0 6px #00d4ff66; margin-left:4px; }
 .fil { font-size:11px; color:#ccc; margin:7px 0 2px; }
 .fil .dim { color:#777; font-size:9px; }
 .meta { display:flex; gap:10px; font-size:9px; color:#888; margin-bottom:7px; flex-wrap:wrap; }
@@ -85,6 +87,7 @@ button.hold { user-select:none; -webkit-user-select:none; touch-action:none; }
 <body>
 <div class="hdr">
     <h1>⬢ LLL LANES</h1>
+    <button id="chk" style="margin-left:auto;margin-right:8px"></button>
     <span id="conn" class="conn ko">connexion…</span>
 </div>
 <div class="grid" id="grid"></div>
@@ -112,7 +115,11 @@ const I18N = {
   phType:'matière (ASA-CF)', phColor:'couleur (noir)',
   phTemp:'temp °C (registre)', phSpool:'n° bobine Spoolman (pastille+conso)',
   save:'enregistrer → LLL_FILAMENT', err:'moteur stoppé',
-  activeLane:'lane active :', print:'print :', gcodeRefused:'GCODE refusé : ' },
+  activeLane:'lane active :', print:'print :', gcodeRefused:'GCODE refusé : ',
+  frozen:'❄ gelée', ttFrozen:'gel sécurité : une autre lane est chargée dans le canal commun',
+  degel:'dégeler', ttDegel:'forcer : oublie la lane chargée et arme le feed de cette lane',
+  check:'check filament', ttCheck:'sonde 30 mm — détecte la lane réellement chargée (buse chaude requise)',
+  loadedMem:'chargée :', unknown:'inconnue' },
  en: { live:'live', reconn:'reconnecting…',
   filUnknown:'no filament set — ✎ to edit',
   present:'filament present', absent:'filament ABSENT', mode:'mode',
@@ -128,7 +135,11 @@ const I18N = {
   phType:'material (ASA-CF)', phColor:'color (black)',
   phTemp:'temp °C (registry)', phSpool:'Spoolman spool # (swatch+usage)',
   save:'save → LLL_FILAMENT', err:'motor stopped',
-  activeLane:'active lane:', print:'print:', gcodeRefused:'GCODE refused: ' }
+  activeLane:'active lane:', print:'print:', gcodeRefused:'GCODE refused: ',
+  frozen:'❄ frozen', ttFrozen:'safety freeze: another lane is loaded in the shared path',
+  degel:'unfreeze', ttDegel:'force: forget the loaded lane and arm feed on this lane',
+  check:'filament check', ttCheck:'30 mm probe — detects which lane is really loaded (hot nozzle required)',
+  loadedMem:'loaded:', unknown:'unknown' }
 };
 let LANG = 'fr';
 const t = k => (I18N[LANG] && I18N[LANG][k]) || I18N.en[k] || k;
@@ -142,6 +153,7 @@ let lanes = {};              // 'lll' -> status object
 let laneNames = [];
 let spoolColors = {};        // spool_id -> hex
 let printState = '';
+let savedVars = {};          // save_variables (lll_loaded_lane, afc_active_lane)
 
 const COLOR_MAP = {          // fallback si pas de bobine Spoolman
     noir:'#1a1a1a', black:'#1a1a1a', blanc:'#e8e8e8', white:'#e8e8e8',
@@ -178,7 +190,7 @@ function connect() {
             const list = await rpc('printer.objects.list');
             laneNames = list.objects.filter(o => o.startsWith('lll_buffer '))
                                     .map(o => o.split(' ')[1]);
-            const subs = { print_stats: null };
+            const subs = { print_stats: null, save_variables: null };
             laneNames.forEach(n => subs['lll_buffer ' + n] = null);
             const r = await rpc('printer.objects.subscribe', { objects: subs });
             applyStatus(r.status);
@@ -209,6 +221,7 @@ function applyStatus(st) {
             lanes[n] = Object.assign(lanes[n] || {}, v);
         }
         if (k === 'print_stats' && v.state !== undefined) printState = v.state;
+        if (k === 'save_variables' && v.variables) savedVars = Object.assign(savedVars, v.variables);
     }
 }
 
@@ -255,6 +268,7 @@ function buildCards() {
             <div class="swatch" id="sw-${n}"></div>
             <span class="lname">${n}</span>
             <span class="role" id="role-${n}"></span>
+            <span class="frz" id="frz-${n}" style="display:none" title="${t('ttFrozen')}">${t('frozen')}</span>
         </div>
         <div class="fil" id="fil-${n}"></div>
         <div class="errbox" id="err-${n}" style="display:none"></div>
@@ -275,6 +289,7 @@ function buildCards() {
                 <button class="hold tbtn" id="jf-${n}" title="${t('ttFw')}">▸▸</button>
             </span>
             <button class="warn" id="clr-${n}" onclick="gcode('LLL_CLEAR_ERROR LANE=${n}')">${t('unlock')}</button>
+            <button class="warn" id="dg-${n}" style="display:none" title="${t('ttDegel')}" onclick="degel('${n}')">❄ ${t('degel')}</button>
             <button title="${t('edit')}" onclick="toggleEdit('${n}')">✎</button>
         </div>
         <div class="editf" id="ed-${n}">
@@ -289,6 +304,10 @@ function buildCards() {
         bindTransport(document.getElementById('jb-' + n), n, 'back');
         bindPlay(document.getElementById('go-' + n), n);
     });
+    const chk = document.getElementById('chk');
+    chk.textContent = '⟲ ' + t('check');
+    chk.title = t('ttCheck');
+    chk.onclick = () => gcode('LLL_DETECT_LOADED MM=30');
 }
 
 // ============ TRANSPORT façon magnétoscope ============
@@ -297,6 +316,9 @@ function buildCards() {
 // Sécurité : chaque ordre jog est borné 10 s côté firmware — si le
 // navigateur meurt en plein latch, le moteur s'arrête seul en <10 s.
 const jstate = {};
+function degel(lane) {
+    gcode("SAVE_VARIABLE VARIABLE=lll_loaded_lane VALUE='\"\"'\nSET_ACTIVE_LANE LANE=" + lane);
+}
 function jogSend(lane, dir) { gcode('LLL_JOG LANE=' + lane + ' DIR=' + dir + ' MS=10000'); }
 function jogStop(lane) { gcode('LLL_JOG LANE=' + lane + ' DIR=stop MS=0'); }
 function stopLatch(lane) {
@@ -408,8 +430,17 @@ function render() {
                  : (s.role === 'standby') ? t('ttPlayResume')
                  : t('ttPlayActivate');
         document.getElementById('clr-' + n).style.display = s.error ? '' : 'none';
+        const loaded = savedVars.lll_loaded_lane !== undefined ? savedVars.lll_loaded_lane : '';
+        const intended = savedVars.afc_active_lane || '';
+        const frozen = (n === intended && loaded && loaded !== n && s.role !== 'active');
+        document.getElementById('frz-' + n).style.display = frozen ? '' : 'none';
+        document.getElementById('dg-' + n).style.display = frozen ? '' : 'none';
     });
-    document.getElementById('active-info').textContent = activeLane ? (t('activeLane') + ' ' + activeLane) : '';
+    const _ld = savedVars.lll_loaded_lane !== undefined ? savedVars.lll_loaded_lane : '';
+    const _it = savedVars.afc_active_lane || '';
+    const _al = activeLane || (_it ? _it + ' ❄' : '');
+    document.getElementById('active-info').textContent =
+        (_al ? (t('activeLane') + ' ' + _al + ' · ') : '') + t('loadedMem') + ' ' + (_ld || t('unknown'));
     document.getElementById('print-info').textContent = printState ? (t('print') + ' ' + printState) : '';
 }
 

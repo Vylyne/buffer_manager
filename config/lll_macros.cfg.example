@@ -33,17 +33,30 @@ gcode:
 gcode:
     SET_GCODE_VARIABLE MACRO=_AFC_VARS VARIABLE=next_temp VALUE={params.TEMP|default(0)|int}
 
+# FEED-GATE (1/3, securite) : selectionner une lane n'arme JAMAIS son auto-feed
+# si une AUTRE lane est encore physiquement chargee (memoire lll_loaded_lane,
+# ecrite a chaque LLL_DETECT_LOADED reussi). Incident terrain derriere ce gate :
+# activer la lane 1 pour un test pendant que la lane 2 occupait le splitter et
+# l'extrudeur a pousse du filament dans le chemin commun (le bras de la lane 1
+# etait en zone PUSH -> feed immediat). Gel = back-only : le rembobinage reste
+# possible, seule la poussee est bloquee. Etat inconnu ('') = comportement
+# d'avant (on n'entrave jamais un flux legitime). Ferme aussi le residuel
+# "lane du print precedent poussee pendant la chauffe" au demarrage.
 [gcode_macro SET_ACTIVE_LANE]
 gcode:
     {% set tgt = params.LANE|lower %}
     {% set lanes = printer["gcode_macro _AFC_VARS"].lanes %}
+    {% set loaded = printer.save_variables.variables.lll_loaded_lane|default('') %}
     {% if tgt not in lanes %}{ action_raise_error("lane inconnue: " ~ tgt) }{% endif %}
     {% for lane, sensor in lanes.items() %}
         SET_FILAMENT_SENSOR SENSOR={sensor} ENABLE={ 1 if lane == tgt else 0 }
-        LLL_SET_IDLE LANE={lane} VALUE={ 0 if lane == tgt else 1 }
+        LLL_SET_IDLE LANE={lane} VALUE={ 0 if (lane == tgt and (loaded == tgt or loaded == '')) else 1 }
     {% endfor %}
     SET_GCODE_VARIABLE MACRO=_AFC_VARS VARIABLE=active VALUE="'{tgt}'"
     SAVE_VARIABLE VARIABLE=afc_active_lane VALUE='"{tgt}"'
+    {% if loaded and loaded != tgt %}
+        RESPOND MSG="Lane {tgt} selectionnee mais {loaded} chargee -> auto-feed {tgt} GELE jusqu'au swap"
+    {% endif %}
 
 # Restaure la lane active PERSISTEE apres un restart (jamais un defaut en dur :
 # sinon la mauvaise lane peut etre promue active et son auto-feed repousse la
@@ -72,6 +85,11 @@ gcode:
 # appelante (la purge s'executerait quand meme) ; l'erreur avorte tout, le
 # print reste en pause -> corrigez la lane -> RESUME rejoue chauffe+check+purge.
 # MM a calibrer sur votre geometrie (30 sur le setup de reference).
+# FEED-GATE (3/3) : dans votre RESUME, juste APRES _AFC_CHECK, ajoutez :
+#     SET_ACTIVE_LANE LANE={printer["gcode_macro _AFC_VARS"].active}
+# (idempotent, ne s'execute que si le check est PASSE) : apres correction
+# manuelle d'un mismatch au demarrage, la lane resterait sinon gelee par le
+# gate pour tout le print.
 [gcode_macro _AFC_CHECK]
 gcode:
     {% if printer.save_variables.variables.lll_filament_check|default(0)|int == 1 %}
@@ -121,6 +139,16 @@ gcode:
             SET_GCODE_VARIABLE MACRO=_AFC_VARS VARIABLE=next_temp VALUE=0
             RESPOND MSG="Vieux filament sorti -> buse vers {nt}C"
         {% endif %}
+        # FEED-GATE (2/3) : des que l'ancien filament a quitte l'entree extrudeur,
+        # l'etat charge redevient inconnu et la lane cible est RE-ARMEE pour le
+        # load+purge (une lane entrante gelee pendant que l'extrudeur tire seul =
+        # patinage/tangle). One-shot grace au garde loaded != ''.
+        {% set loaded_now = printer.save_variables.variables.lll_loaded_lane|default('') %}
+        {% if loaded_now != '' and not printer["filament_switch_sensor " ~ es].filament_detected %}
+            SAVE_VARIABLE VARIABLE=lll_loaded_lane VALUE='""'
+            SET_ACTIVE_LANE LANE={printer["gcode_macro _AFC_VARS"].active}
+            RESPOND MSG="Ancien filament hors tete -> auto-feed re-arme pour le load"
+        {% endif %}
     {% else %}
         SET_GCODE_VARIABLE MACRO=_AFC_VARS VARIABLE=cc_pause VALUE=0
         UPDATE_DELAYED_GCODE ID=_AFC_PAUSE_HARDCAP DURATION=0
@@ -153,7 +181,9 @@ description: Panneau LLL - etats des lanes + actions
 gcode:
     {% set vars = printer["gcode_macro _AFC_VARS"] %}
     {% set active = vars.active %}
+    {% set loaded = printer.save_variables.variables.lll_loaded_lane|default('') %}
     RESPOND TYPE=command MSG="action:prompt_begin LLL - Lanes filament"
+    RESPOND TYPE=command MSG="action:prompt_text Chargee (memoire): {loaded if loaded else 'inconnue'} | Active: {active}"
     {% for lane in vars.lanes.keys() %}
         {% set s = printer["lll_buffer " ~ lane] %}
         {% set f = s.filament %}
@@ -165,11 +195,14 @@ gcode:
         {% if lane != active %}
             RESPOND TYPE=command MSG="action:prompt_button Activer {lane}|_LLL_PANEL_DO ACT=swap LANE={lane}|primary"
         {% endif %}
+        {% if lane == active and loaded and loaded != lane %}
+            RESPOND TYPE=command MSG="action:prompt_button Degeler {lane} (forcer feed)|_LLL_PANEL_DO ACT=degel LANE={lane}|warning"
+        {% endif %}
         {% if s.error %}
             RESPOND TYPE=command MSG="action:prompt_button Debloquer {lane}|_LLL_PANEL_DO ACT=clear LANE={lane}|error"
         {% endif %}
     {% endfor %}
-    RESPOND TYPE=command MSG="action:prompt_footer_button Sonde|_LLL_PANEL_DO ACT=probe|secondary"
+    RESPOND TYPE=command MSG="action:prompt_button Check filament (sonde)|_LLL_PANEL_DO ACT=probe|secondary"
     RESPOND TYPE=command MSG="action:prompt_footer_button Rafraichir|_LLL_PANEL_DO ACT=none|info"
     RESPOND TYPE=command MSG="action:prompt_footer_button Fermer|RESPOND TYPE=command MSG=action:prompt_end|warning"
     RESPOND TYPE=command MSG="action:prompt_show"
@@ -182,6 +215,10 @@ gcode:
         SET_ACTIVE_LANE LANE={params.LANE}
     {% elif params.ACT == 'clear' %}
         LLL_CLEAR_ERROR LANE={params.LANE}
+    {% elif params.ACT == 'degel' %}
+        SAVE_VARIABLE VARIABLE=lll_loaded_lane VALUE='""'
+        SET_ACTIVE_LANE LANE={params.LANE}
+        RESPOND MSG="Degel force: {params.LANE} armee (etat charge remis a inconnu)"
     {% elif params.ACT == 'probe' %}
         LLL_DETECT_LOADED
     {% endif %}

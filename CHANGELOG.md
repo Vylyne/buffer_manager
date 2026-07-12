@@ -1,5 +1,43 @@
 # Changelog
 
+## v1.0.2 — Feed-gate on lane selection + dashboard unfreeze/check — 2026-07-12
+
+Host-side only (example macros + dashboard): **no firmware rebuild or flash needed**.
+
+### Added
+- Example macros: **feed-gate in `SET_ACTIVE_LANE`** — selecting a lane no
+  longer arms its autonomous auto-feed while a *different* lane is physically
+  loaded (tracked in `lll_loaded_lane`, written by every successful
+  `LLL_DETECT_LOADED`). The frozen lane stays back-only (rewind still works,
+  forward push impossible) and a console message says so; unknown state (`''`)
+  arms as before, so a legitimate flow is never blocked. Field incident behind
+  this: activating lane 1 for a test while lane 2 still occupied the merger
+  and the extruder armed lane 1's autonomous feed — its buffer arm was sitting
+  in the PUSH hall zone, so it immediately fed filament into the occupied
+  common path. The same gate also closes the residual "previous print's lane
+  feeds during heat-up" window at print start.
+- Example macros: **automatic re-arm during a swap** (`_AFC_TEMP_WATCH`) — the
+  moment the old filament clears the extruder-entry sensor, `lll_loaded_lane`
+  is reset to unknown and the target lane is re-armed, so load+purge gets
+  buffer assist (an incoming lane frozen while the extruder pulls alone means
+  slip and tangles). One-shot, guarded by `loaded != ''`.
+- Example macros: documented RESUME line — call
+  `SET_ACTIVE_LANE LANE={printer["gcode_macro _AFC_VARS"].active}` right after
+  `_AFC_CHECK` (idempotent, runs only when the check *passed*): without it, a
+  lane frozen at print start would stay frozen for the whole print after you
+  fix a mismatch by hand.
+- Dashboard: **frozen badge + one-click "unfreeze"** on the affected lane card,
+  visible only while the gate is actually freezing that lane. Unfreeze is the
+  deliberate override: reset the loaded-lane memory to unknown, then re-select
+  the lane (which arms it).
+- Dashboard: **header "filament check" button** (`LLL_DETECT_LOADED`) and a
+  permanent footer status `active lane · loaded lane` — the state driving the
+  gate is always visible.
+- `LLL_PANEL` (Mainsail dialog): same controls — conditional unfreeze button,
+  loaded/active status line, and the probe promoted from a footer button to a
+  regular button (some Mainsail set-ups don't render footer buttons).
+
+
 ## v1.0.1 — Pre-purge filament gating — 2026-07-10
 
 Host-side only (extra + example macros): **no firmware rebuild or flash needed**.

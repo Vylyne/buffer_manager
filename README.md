@@ -203,6 +203,7 @@ location /lll/ { alias /home/pi/lll_dashboard/; index index.html; add_header Cac
 - Talks to Moonraker over its WebSocket through Mainsail's existing proxy — same origin, **zero CORS configuration**.
 - **Auto-discovers every lane**: declare a new `[lll_buffer <lane>]` and its card appears by itself.
 - **VCR-style transport** per lane: **hold** = jog, **double-click** = continuous, **single click** = stop. Continuous mode is a stream of **10-second-bounded orders refreshed every 3 s** — the page never sends an unbounded command, so if the browser dies mid-run the motor stops on its own in under 10 s.
+- **Feed-gate aware** (v1.0.2): the footer always shows *active lane · loaded lane*; when the safety gate freezes a lane (selected while a different one is still physically loaded), its card shows a **frozen badge** and a one-click **unfreeze** (deliberate override: reset the loaded-lane memory and re-arm). A header **filament check** button runs `LLL_DETECT_LOADED` on demand.
 - **Language follows Mainsail's own setting** (read from the Moonraker database), falling back to the browser language. English and French bundled.
 - **Spoolman** (optional): run Spoolman as its own service (port 7912), add `[spoolman]` with `server: http://localhost:7912` / `sync_rate: 5` to `moonraker.conf` → Mainsail's native spool panel appears, and `LLL_FILAMENT ... SPOOL_ID=` links a lane to a spool. **When a lane becomes active, its spool becomes Moonraker's active spool** — per-spool usage tracking follows the lane.
 - **LCD menu** (optional): [config/lcd_menu_lll.cfg.example](config/lcd_menu_lll.cfg.example) for a BTT MINI12864 — per-lane state + Activate / Park / Clear error. Safe manual-rewind workflow: **Park → physical buttons → Activate** (a parked lane never re-feeds forward under you).
@@ -428,6 +429,8 @@ Honest scope of what has been tested:
 ## Host macros (example)
 
 **[config/lll_macros.cfg.example](config/lll_macros.cfg.example)** ships the multi-lane orchestration layer used on the reference setup: `SET_ACTIVE_LANE`, `_LLL_INIT`, the `Tn` / `_COLOR_CHANGE` tool-change entry points, `LLL_PANEL`, and friends. It is the layer the dashboard and the command manuals refer to. Copy it into your `printer.cfg` (or `[include]` it) and adapt lane names, temperatures and purge values to your machine.
+
+Since **v1.0.2** this layer ships a **feed-gate**: `SET_ACTIVE_LANE` never arms a lane's autonomous feed while a *different* lane is physically loaded (`lll_loaded_lane` memory, written by `LLL_DETECT_LOADED`), with automatic re-arm during a swap once the old filament has left the extruder entry — see the [CHANGELOG](CHANGELOG.md) for the field incident behind it.
 
 ## Multicolor / automatic filament change — status
 
