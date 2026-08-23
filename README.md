@@ -7,7 +7,7 @@
 
 A downstream fork of
 **[Nitrooxyde/Mellow-LLL-Plus-Canonical](https://github.com/Nitrooxyde/Mellow-LLL-Plus-Canonical)**
-that adds an **build speciffic features** for my **toolchanger** — six
+that adds an **build specific features** for my **toolchanger** — six
 buffers feeding six toolheads, one lane per tool, no splitter, and [specific hardware](#hardware).
 
 Upstream built the buffer firmware and host control layer this is based on, and
