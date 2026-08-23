@@ -168,119 +168,55 @@ rather than for merging.
 
 ## Install & update
 
-Firmware is **not** built in this repo. `src/buffer.c` is copied into a Klipper
-tree on the Klipper host (a Raspberry Pi) and built there — see
-[CLAUDE.md](CLAUDE.md) for the exact commands, and upstream's Installation
-section below for the one-time Katapult bootloader setup, which is unchanged.
+Basic install script present that links the extras, and buffer.c to ~/klipper folders.
 
-Updates on this machine go through **mcu-updater** rather than the
-`install.sh` / `uninstall.sh` scripts upstream ships. Those scripts are left in
-the tree for now but are not the supported path here.
-
-Target: STM32F072, 8 KiB bootloader offset (application address `0x8002000`,
-must match Katapult), 8 MHz crystal, USB on PA11/PA12.
-
----
-
-## The bigger picture — multicolor with just buffers
-
-This firmware is one brick of a larger goal: **multicolor / multi-material
-printing on a single direct-drive toolhead without a selector MMU** — no
-ERCF, no BoxTurtle, no AMS. One LLL Plus buffer per filament lane, a passive
-splitter, Klipper orchestrating lane roles. Two lanes ran in production on
-the reference setup, including real prints with color changes; a fully
-automatic load/unload pipeline was prototyped end-to-end and worked, then
-was withdrawn — held back by missing *equipment* (toolhead cutter, passive
-respoolers), not by the concept.
-
-![Reference rig](docs/img/architecture_tested.svg)
-
-**Read the full story — objective, what was proven, what held us back, and
-why an equipped, clean installation makes LLL-only multicolor entirely
-feasible:** [docs/THE_PROJECT_STORY.en.md](docs/THE_PROJECT_STORY.en.md)
-([FR](docs/THE_PROJECT_STORY.fr.md)) · method details:
-[docs/MULTICOLOR_STATUS.en.md](docs/MULTICOLOR_STATUS.en.md).
-
----
-
-## What's new — "Canonical v1, runtime-toggleable" (v1.0.0 of this repo)
-
-The autonomous smart-buffer core is **unchanged** (same hall conventions, same TMC2208 `VACTUAL` drive, same feed behaviour, buttons included) — with one deliberate exception: after a hard MCU reset, autonomous feeding waits for the host or 20 s (safety fix #9, see [Known behaviour](#known-behaviour--limitations)). Everything below is added **on top**:
-
-- **11 runtime-toggleable functions** (`LLL_ENABLE`): FEED, BUTTONS, MBSIG, ENTRANCE, TMC, MOVE, DIAG, LED, ADC, TELEM, IOEXT — **one flash**, everything selectable at runtime. No more rebuilding to change behaviour.
-- **Roles per lane**: `active` / `parked` / `standby`. A parked lane **never auto-feeds forward** (multi-lane safety) but still follows a rewind; standby is fully frozen. `LLL_SET_IDLE` is kept as a backwards-compatible alias.
-- **4 feed automation levels**: `auto` / `semi_auto` (one cycle per `LLL_ARM`) / `semi_manual` / `manual`.
-- **Bounded motion only**: `LLL_JOG` (hard-limited to 10 s in firmware) and `LLL_RUN` (deadline, refreshable). **No unbounded motion order exists in the command set.**
-- **Runtime tuning** (`LLL_SET`): feed/back timeouts, TMC current, microsteps, stealthChop, telemetry mask… persisted and replayed at every boot. **Named profiles** per lane (`LLL_PROFILE_SAVE / LOAD / LIST / DELETE`).
-- **Telemetry events** (`lll_event` push) with a configurable `event_gcode` hook — react to jams / runout / diag edges from printer.cfg in ~20–50 ms instead of waiting for a poll.
-- **IOEXT**: a 12-channel, **index-only** GPIO/PWM/ADC register for the spare connectors — critical pins are *not in the table*, hence physically unreachable; unverified pins are gated behind `LLL_UNLOCK`.
-- **Filament identity & probing**: `LLL_FILAMENT` (type / color / temp / Spoolman spool) and `LLL_DETECT_LOADED` (detects which lane is physically engaged in the extruder using only the buffer arm sensors).
-- **Multi-lane, N-scalable**: one `[mcu]` + one `[lll_buffer]` section per board — every G-code command is multiplexed by `LANE=`. The dashboard auto-discovers new lanes.
-- **Web dashboard** (optional): a single self-contained HTML page shown inside Mainsail as an iframe webcam card, with a VCR-style per-lane transport. See [Dashboard & UI](#dashboard--ui).
-
----
-
-## Why this exists
-
-The official Mellow firmware is **standalone**: the buffer auto-feeds on its own but the board does **not** talk Klipper (no USB MCU; runout has to go through a separate signal wire).
-
-The community Klipper integrations ([river29](https://github.com/river29/Mellow-LLLBufferPLUS-klipper), [ss1gohan13](https://github.com/ss1gohan13/BufferPLUS-klipper)) flash **stock Klipper** and re-implement the buffer with **host-side g-code macros**. That works, but feed bursts go through the **g-code queue** (latency, can lag during long `G1 E` moves) and they switch the active extruder, which can **misdirect extrusion during a print**.
-
-This project runs the buffer state machine **inside the MCU firmware** as a Klipper task — zero g-code-queue latency, no active-extruder juggling, can't stall a print — while the host gets a **full command surface** on top.
-
-| | Standalone (Mellow) | Stock Klipper + host macros | **This firmware** |
-| --- | --- | --- | --- |
-| Auto-feed | ✅ in-firmware | ⚠️ host macros (queue latency) | ✅ **in-firmware** |
-| Klipper MCU / USB sensor | ❌ | ✅ | ✅ |
-| Risk of disrupting a print | n/a | ⚠️ `ACTIVATE_EXTRUDER` | ✅ none |
-| Runout → print pause | signal wire | USB (PB7) | USB (PB7) |
-| Host control (roles, modes, moves, tuning) | ❌ | partial (macros) | ✅ **21 G-code commands** |
-| Multi-lane | ❌ | ⚠️ manual macro work | ✅ N-scalable (`LANE=`) |
-| One flash, all features | ❌ | — | ✅ runtime-toggleable |
-
----
-
-## Architecture
-
-Three stages, each optional beyond the first:
-
-1. **MCU firmware task** (`src/buffer.c`) — the autonomous state machine (Mellow's logic ported verbatim) plus a command layer: **15 MCU commands / 5 response messages** (`lll_state`, `lll_ack`, `lll_event`, `lll_io`, `lll_io_ack`). The protocol block is shared byte-identically with the host extra. The file is *added* to the Klipper tree (modifies nothing) and survives `git pull`.
-2. **Klipper host extra** (`klippy/extras/lll_buffer.py`) — one `[lll_buffer <lane>]` object per board: registers the **21 G-code commands** (per-lane mux by `LANE=`), exposes live state to macros via `printer["lll_buffer <lane>"]`, runs your `event_gcode` on every firmware event, and **persists + replays** roles/modes/enables/tweaks through `[save_variables]` at every connect.
-3. **Web dashboard** (`dashboard/index.html`, optional) — a static page served by your existing nginx, talking to Moonraker's WebSocket, embedded in Mainsail as an iframe webcam card.
-
----
-
-## How it works (the autonomous core)
-
-A small Klipper MCU task (`src/buffer.c`, `DECL_INIT` + `DECL_TASK`) ports the state machine of Mellow's open firmware ([Fly3DTeam/Buffer](https://github.com/Fly3DTeam/Buffer)) and drives the on-board TMC2208 over its single-wire UART (`VACTUAL` velocity mode):
-
-```python
-HALL3 (PB4) blocked  → motor FORWARD (push filament)
-HALL2 (PB3) blocked  → motor STOP
-HALL1 (PB2) blocked  → motor BACK (retract)
-ENDSTOP_3 (PB7) = no filament → STOP   (+ host can pause the print)
+```bash
+cd ~
+git clone https://github.com/Vylyne/buffer_manager.git
+~/buffer_manager/install.sh
 ```
 
-Photo-sensor convention is taken **verbatim** from the source: *blocked = 1, clear = 0*. Manual **feed/retract buttons** (KEY1/KEY2) and the **mainboard control signals** (PB5/PB6, active-low) are supported too (both runtime-toggleable). A 60 s continuous-feed timeout acts as a jam safety; a matching 60 s back-timeout guards rewinds. Error codes (`ecode`) a lane can latch: `none`, `feed_timeout`, `back_timeout`, `diag_fault`, `host_alive`, `clear_pending` — reported by `LLL_QUERY` and pushed as `lll_event`.
+Klipper folder can be overridden by setting KLIPPER_DIR before running the script.
 
-### Pins (STM32F072CB)
+[Dashbaord install instructions](dashboard/INSTALL.md)
 
-| Function | Pin | Function | Pin |
-| --- | --- | --- | --- |
-| HALL1 | PB2 | KEY1 (retract) | PB13 |
-| HALL2 | PB3 | KEY2 (feed) | PB12 |
-| HALL3 | PB4 | FRONT signal | PB5 |
-| Entrance switch | PB7 | BACK signal | PB6 |
-| TMC EN | PA6 | TMC UART | PB1 |
-| TMC DIAG | PB0 | LEDs | PA8 / PA15 |
+I personally manage my MCU firmware through [mcu-updater](https://github.com/Vylyne/mcu-updater/), which
+allows automatically adds the requested Klipper Makefile Patch for build removing after.
 
-Spare I/O (IOEXT channels): PA4, PA5, PB10, PB11, PA2, PA3, plus bench-gated LED/ADC pins. USB, SWD, TMC UART, halls, PB7, buttons and the 5 V headers are **outside** the IOEXT table by construction.
+Example mcu-updater config for this firmware.
+```ini
+[type flylllplusbuffer]
+chipset: stm32f072xb
+klipper_makefile_patches:
+    src/Makefile -> src-y += buffer.c
+firmware: klipper, katapult
+serials:
+    871A6FC9BCE62A9C1B0A813F-if00  # mcu T0_buffer
+    4250CF550462AEA097AEBBFC-if00  # mcu T1_buffer
+    2079CA43E1E79399AD4C3B75-if00  # mcu T2_buffer
+    8AA2F6DC15113101D0CEA4BF-if00  # mcu T3_buffer
+    D5A1792666DB424A9DF62E17-if00  # mcu T4_buffer
+    533517F4A9E059C80E2929A1-if00  # mcu T5_buffer
+```
+
+### Katapult menuconfig
+
+![Katapult MenuConfig](docs/img/katapult.png)
+
+### Klipper menuconfig
+
+![Klipper MenuConfig](docs/img/klipper.png)
+
+**Target**: STM32F072, 8 KiB bootloader offset (application address `0x8002000`,
+must match Katapult), 8 MHz crystal, USB on PA11/PA12.
+
+[manual firmware install path](#installation)
 
 ---
 
 ## Safety hardening
 
-Nine fixes, **all present in the shipped code**:
+Nine fixes, **inherited from upstream**:
 
 1. `sched_is_shutdown()` guard as the **literal first line** of the buffer task, plus a `DECL_SHUTDOWN` handler that drives the motor enable high. **Bench-proven:** an `M112` fired in the middle of a commanded `LLL_RUN` cuts the motor dead.
 2. **Single-writer**: command handlers set flags only — only the task and the shutdown handler ever touch EN/UART.
