@@ -80,7 +80,7 @@ Filamentalist V3 rewinder -> buffer -> MDM (on the buffer arm)
 | --- | --- |
 | [Filamentalist V3](https://github.com/Carrot-collective/Filamentalist_Rewinder/tree/main/Filamentalist_FV3_Rewinder) | Passive rewinder — takes back retracted filament |
 | [Mellow FLY LLL Buffer Plus](https://mellow.klipper.cn/en/docs/ProductDoc/ExtensionBoard/fly-buffer-plus/) | Buffer and feed motor; runs this firmware |
-| [Mellow MDM](https://mellow.klipper.cn/en/docs/ProductDoc/ExtensionBoard/fly-mdm/) | Encoder module - presence and motion - [Combined MDM and Buffer Slide](CAD/Combined%20MDM%20Main%20Body%20and%20LLL%20Buffer%20Plus%20Slide.step) |
+| [Mellow MDM](https://mellow.klipper.cn/en/docs/ProductDoc/ExtensionBoard/fly-mdm/) | Encoder module - presence and motion - [Combined MDM and Buffer Slide](Combined-MDM-Mainbody-and-Buffer-Slide/) |
 | [Roadrunner](https://github.com/EiNSTeiN-/roadrunner-filament-sensor/) | High-resolution filament sensor before the extruder |
 | Toolhead switch | Plain switch after the extruder gear |
 
