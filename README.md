@@ -7,14 +7,14 @@
 
 A downstream fork of
 **[Nitrooxyde/Mellow-LLL-Plus-Canonical](https://github.com/Nitrooxyde/Mellow-LLL-Plus-Canonical)**
-that adds an **automatic load / unload pipeline** for a **toolchanger** — six
-buffers feeding six toolheads, one lane per tool, no splitter.
+that adds an **build speciffic features** for my **toolchanger** — six
+buffers feeding six toolheads, one lane per tool, no splitter, and [specific hardware](#hardware).
 
 Upstream built the buffer firmware and host control layer this is based on, and
 did the hard work of proving the concept. It deliberately withdrew its automatic
 load/unload pipeline. This fork puts one back, because the reasons it was
 withdrawn do not apply to this machine — see
-[Why this fork can do what upstream withdrew](#why-this-fork-can-do-what-upstream-withdrew).
+[Why this fork includes load and unload](#why-this-fork-includes-load-and-unload).
 Mostly I'm experimenting with features that are very dependent on my current platform.
 
 > **Nothing in this fork has run on hardware yet.** Every distance, duration
@@ -27,7 +27,7 @@ Mostly I'm experimenting with features that are very dependent on my current pla
 - [Features](#features)
 - [TODO](#todo)
 - [Hardware](#hardware)
-- [Why this fork can do what upstream withdrew](#why-this-fork-can-do-what-upstream-withdrew)
+- [Why this fork includes load and unload](#why-this-fork-includes-load-and-unload)
 - [How the load pipeline works](#how-the-load-pipeline-works)
 - [Changes to upstream](#changes-to-upstream)
 - [Install & update](#install--update)
@@ -70,14 +70,14 @@ Mostly I'm experimenting with features that are very dependent on my current pla
 
 ## Hardware
 
-```
+```python
 Filamentalist V3 rewinder -> buffer -> MDM (on the buffer arm)
     -> long reverse bowden -> Roadrunner -> short bowden
     -> Extruder -> toolhead switch -> hotend
 ```
 
 | Part | Role |
-|---|---|
+| --- | --- |
 | [Filamentalist V3](https://github.com/Carrot-collective/Filamentalist_Rewinder/tree/main/Filamentalist_FV3_Rewinder) | Passive rewinder — takes back retracted filament |
 | Mellow FLY LLL Buffer Plus | Buffer and feed motor; runs this firmware |
 | Mellow MDM | Encoder module on the buffer arm — presence and motion |
@@ -100,7 +100,7 @@ distance" is travel per **full segment cycle**, and the firmware counts **both**
 edges — so one count is half that figure:
 
 | Disk | Vendor distance | Edges/rev | `mdm_mm_per_count` |
-|---|---|---|---|
+| --- | --- | --- | --- |
 | 3-segment | 5.8 mm | 6 | 2.90 mm |
 | 5-segment *(installed)* | 3.5 mm | 10 | **1.75 mm** |
 | 10-segment | 1.73 mm | 20 | 0.865 mm |
@@ -109,7 +109,7 @@ Segments times distance is constant at about 17.4 mm — the filament travel per
 disk revolution, which cross-checks the reading. **Do not enter the vendor
 figure directly**; that makes every MDM distance read twice too long.
 
-## Why this fork can do what upstream withdrew
+## Why this fork includes load and unload
 
 Upstream shelved its automatic pipeline citing three things: no toolhead
 cutter, no passive respoolers, and fragility across a splitter/merger. Their
@@ -135,7 +135,7 @@ rewinders, the automatic path is realistic with what this repo ships."*
 ## How the load pipeline works
 
 | Phase | What happens | Measured by |
-|---|---|---|
+| --- | --- | --- |
 | **A — push** | Buffer jogs in short bounded pulses. Pulsed on purpose: a continuous push overshoots and buckles at any unguided gap. Cold-safe. | **MDM only** — filament has not reached the Roadrunner yet |
 | **B — assist** | Extruder pulls while the buffer keeps pushing, until the toolhead switch confirms the gear grabbed. Needs heat. | Roadrunner, plus the differential check |
 | **C — handoff** | Buffer returns to firmware autonomy; `loaded_gcode` runs. | — |
@@ -229,7 +229,7 @@ The community Klipper integrations ([river29](https://github.com/river29/Mellow-
 This project runs the buffer state machine **inside the MCU firmware** as a Klipper task — zero g-code-queue latency, no active-extruder juggling, can't stall a print — while the host gets a **full command surface** on top.
 
 | | Standalone (Mellow) | Stock Klipper + host macros | **This firmware** |
-|---|---|---|---|
+| --- | --- | --- | --- |
 | Auto-feed | ✅ in-firmware | ⚠️ host macros (queue latency) | ✅ **in-firmware** |
 | Klipper MCU / USB sensor | ❌ | ✅ | ✅ |
 | Risk of disrupting a print | n/a | ⚠️ `ACTIVATE_EXTRUDER` | ✅ none |
@@ -254,7 +254,7 @@ Three stages, each optional beyond the first:
 
 A small Klipper MCU task (`src/buffer.c`, `DECL_INIT` + `DECL_TASK`) ports the state machine of Mellow's open firmware ([Fly3DTeam/Buffer](https://github.com/Fly3DTeam/Buffer)) and drives the on-board TMC2208 over its single-wire UART (`VACTUAL` velocity mode):
 
-```
+```python
 HALL3 (PB4) blocked  → motor FORWARD (push filament)
 HALL2 (PB3) blocked  → motor STOP
 HALL1 (PB2) blocked  → motor BACK (retract)
@@ -266,7 +266,7 @@ Photo-sensor convention is taken **verbatim** from the source: *blocked = 1, cle
 ### Pins (STM32F072CB)
 
 | Function | Pin | Function | Pin |
-|---|---|---|---|
+| --- | --- | --- | --- |
 | HALL1 | PB2 | KEY1 (retract) | PB13 |
 | HALL2 | PB3 | KEY2 (feed) | PB12 |
 | HALL3 | PB4 | FRONT signal | PB5 |
@@ -299,7 +299,7 @@ Nine fixes, **all present in the shipped code**:
 All commands take `LANE=<lane>` (the `[lll_buffer <lane>]` section name), except `LLL_DETECT_LOADED` which is global.
 
 | Command | What it does |
-|---|---|
+| --- | --- |
 | `LLL_QUERY` | Full state report: role, mode, error/ecode, feeding, running, arm position, filament present, diag, cfgerr |
 | `LLL_ROLE` | Set lane role `active` / `parked` / `standby` (persistent) |
 | `LLL_SET_IDLE` | Backwards-compat alias (`VALUE=1` → parked, `0` → active) |
@@ -460,6 +460,7 @@ src-$(CONFIG_MACH_STM32F072) += buffer.c
 ### Step 6 — Build Klipper
 
 > ⚠️ `make menuconfig` overwrites `~/klipper/.config`. If you build other MCUs (your main board, toolhead…) from this same tree, **back up its config first** and restore it afterwards:
+>
 > ```bash
 > cp ~/klipper/.config ~/klipper/.config.mainboard   # backup
 > # ...build & flash the buffer...
@@ -536,7 +537,7 @@ make clean && make          # (re-add the Makefile line if a git pull removed it
 Derived directly from Mellow's firmware parameters (via the `TMCStepper` library it uses), not guessed:
 
 | Register | Value | Notes |
-|---|---|---|
+| --- | --- | --- |
 | GCONF | `0x000001C4` | spreadCycle, pdn_disable, mstep_reg_select (shaft bit set for FORWARD) |
 | CHOPCONF | `0x12020055` | toff=5, vsense, 64 µsteps, intpol |
 | IHOLD_IRUN | `0x00010F07` | IRUN=15, IHOLD=7 (≈ `rms_current(500)` @ Rsense 0.11) |
@@ -558,7 +559,7 @@ The auto-feed task bit-bangs the TMC2208 `VACTUAL` value over a software UART. E
 Measured over a full print (`klippy.log` / MCU stats):
 
 | Metric | Value | Meaning |
-|---|---|---|
+| --- | --- | --- |
 | `mcu_awake` | ~0.03–0.06 | awake only **~3–6 %** of the time |
 | `mcu_task_avg` | ~0.4 ms | tasks are short |
 | `mcu_task_stddev` | ~2.5 ms | spikes from the bit-bang `VACTUAL` bursts (~8 ms) — this is what drives the "100 %" bar |
@@ -577,6 +578,7 @@ The state machine — identical to Mellow's standalone, all versions — starts 
 The compiled-in defaults are `active` / `auto` (deliberate: a board that loses its host **keeps buffering**). After a **hard MCU reset** (`FIRMWARE_RESTART`, an `M112` emergency stop, or a power-cycle) the task runs on those defaults before Klipper's config arrives — on earlier builds this caused a brief phantom filament push whenever the tension arm was loaded. **The shipped firmware closes this**: no autonomous step-9 motion (forward feed or active-role back-follow) starts until the host has spoken once, capped at 20 s. Buttons, jog, run, roles and the parked follow stay live during the grace. Field-proven on the reference setup: `FIRMWARE_RESTART` with a fully-tensioned arm → zero motion, arm position unchanged.
 
 Two honest notes:
+
 - **Deliberate standalone trade-off, not Mellow parity**: a board that is *never* host-driven starts auto-feeding 20 s after power-on, where Mellow's stock standalone firmware starts ~1 s after boot. That one-time latency is the price of closing the post-reset push.
 - `role: parked` in printer.cfg remains recommended as a complementary layer (it also covers the case of a Klipper host that stays down longer than 20 s with a tensioned arm).
 
