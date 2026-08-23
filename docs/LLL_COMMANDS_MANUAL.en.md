@@ -49,6 +49,10 @@ LLL_QUERY LANE=lll
 | `present` | 1 = filament detected at the board's inlet |
 | `diag` | 1 = driver DIAG line active (if the diag function is enabled) |
 | `cfgerr` | 1 = a config command has been rejected since the last error clear (check the console) |
+| `mdm_present` | 1 = filament detected at the MDM module (PA4, buffer arm) — polarity unverified on the bench |
+| `mdm_count` | free-running `uint32` MDM encoder pulse count (PA5); wraps, diff it with unsigned wrap-safe arithmetic, same as the Roadrunner's `position` |
+
+The board's own state message also carries a wire-protocol version (`proto`), not shown in the console line above: `lll_buffer.py` checks it against its own constant at startup and refuses to connect on a mismatch, naming both versions, rather than risk misparsing a `lll_state` whose shape changed underneath it.
 
 ---
 
@@ -119,10 +123,9 @@ LLL_ENABLE LANE=lll FUNC=led EN=1
 | `run_max` | max duration of an `LLL_RUN` (ms) | 1000-60000 | 30000 |
 | `host_alive` | host-loss watchdog: 0=off, otherwise delay in ms (cuts commanded movements if Klipper stops talking; autonomy continues) | 0 or 3000-60000 | 0 |
 | `gate_by_role` | 1 = buttons inactive when the lane is not active | 0/1 | 0 |
-| `inform` | "button pressed" outputs to PA2/PA3 (original Mellow behavior) | 0/1 | 1 |
 | `diag_action` | on driver fault: 0=report only, 1=stop and latch | 0/1 | 0 |
 | `diag_polarity` | electrical polarity of the DIAG line (to be determined on the bench) | 0/1 | 0 |
-| `event_mask` | filter for the pushed events (127 = all) | 0-127 | 15 |
+| `event_mask` | filter for the pushed events (255 = all) | 0-255 | 15 |
 ```
 LLL_SET LANE=lll PARAM=speed VALUE=60000
 → LLL lll: speed=60000 (applied=60000)
@@ -193,12 +196,14 @@ Enable it first: `LLL_ENABLE LANE=<lane> FUNC=ioext EN=1`
 
 | CH | Pin | Analog | Lock |
 |---|---|---|---|
-| 0 / 1 | PA4 / PA5 (IO connector) | ✅ | no |
+| 0 / 1 | *unavailable* — reclaimed by the MDM module (T3, PA4/PA5) | — | always refused |
 | 2 / 3 | PB10 / PB11 (IO connector) | — | no |
-| 4 / 5 | PA2 / PA3 (EXT) | ✅ | 🔒 + release `inform` |
+| 4 / 5 | *unavailable* — reclaimed by the external Feed/Retract buttons (T2, PA2/PA3) | — | always refused |
 | 6 / 7 | PB5 / PB6 | — | `mbsig` function off |
 | 8 / 9 | PA8 / PA15 (LED) | — | 🔒 + `led` function off |
 | 10 / 11 | PA0 / PA1 (VIN / board temp) | ✅ | 🔒 + `adc` function off |
+
+Channels 0/1 and 4/5 keep their index (never renumbered — indices are a published host-facing contract, see `docs/`/runbook §0) but every `LLL_IO_CFG`/`LLL_IO_READ` on them is refused unconditionally, `LLL_UNLOCK` included: PA4/PA5 are now the MDM presence/motion inputs and PA2/PA3 are now the external buttons, neither is IOEXT-reachable any more.
 
 ### `LLL_UNLOCK LANE=<lane> KEY=0xDEB1`
 Unlocks the 🔒 channels **for the session** (deliberately not persistent: using an unvalidated pin should remain a conscious act).
@@ -239,7 +244,7 @@ role: parked                # RECOMMENDED for multi-lane: each board starts
 #    PAUSE
 #  {% endif %}
 ```
-`event_gcode` receives `event.name` (`ecode_set`, `error_cleared`, `present`, `diag`, `button`, `arm`, `role`), `event.code`, `event.value`, `event.lane` — reaction in ~20-50 ms. The `button/arm/role` events require `LLL_SET PARAM=event_mask VALUE=127`.
+`event_gcode` receives `event.name` (`ecode_set`, `error_cleared`, `present`, `diag`, `button`, `arm`, `role`, `mdm`), `event.code`, `event.value`, `event.lane` — reaction in ~20-50 ms. The `button/arm/role` events require `LLL_SET PARAM=event_mask VALUE=255` (255 = everything; `arm` alone is bit 5 = `0x20`, so `event_mask VALUE=47` (`0x2F`) if you only want it added to the default; `mdm` is bit 7 = `0x80`, off by default too — `VALUE=143` (`0x8F`) for MDM+default).
 
 **For macros**: the whole state lives in `printer["lll_buffer <lane>"]` (same fields as LLL_QUERY + a compatible `idle` + `last_event`). An `LLL_QUERY` forces an immediate refresh.
 

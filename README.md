@@ -1,16 +1,184 @@
-# Mellow FLY LLL Buffer Plus — Canonical v1 Klipper MCU Firmware (autonomous auto-feed + full host control)
+# buffer_manager — toolchanger-aware buffer, load & unload for Klipper
 
 [![License: GPL v3](https://img.shields.io/badge/License-GPLv3-blue.svg)](LICENSE)
 ![MCU](https://img.shields.io/badge/MCU-STM32F072CB-green)
 ![Klipper](https://img.shields.io/badge/Klipper-MCU%20firmware-orange)
-![Version](https://img.shields.io/badge/firmware-canonical%20v1-blueviolet)
+![Status](https://img.shields.io/badge/status-unvalidated%20on%20hardware-red)
 
-Custom **Klipper MCU firmware** for the Mellow **FLY LLL Buffer Plus** that brings together the **best of both worlds**:
+A downstream fork of
+**[Nitrooxyde/Mellow-LLL-Plus-Canonical](https://github.com/Nitrooxyde/Mellow-LLL-Plus-Canonical)**
+that adds an **automatic load / unload pipeline** for a **toolchanger** — six
+buffers feeding six toolheads, one lane per tool, no splitter.
 
-- 🟢 the **autonomous smart-buffer auto-feed** of Mellow's standalone firmware (hall sensors drive the feed motor *in firmware*, real-time), **and**
-- 🟢 the board running as a **standard Klipper USB MCU** — runout → print pause, **plus** (new in this canonical release) a complete host control layer: 21 G-code commands, per-lane roles, runtime-toggleable functions, telemetry events, and an optional web dashboard inside Mainsail.
+Upstream built the buffer firmware and host control layer this is based on, and
+did the hard work of proving the concept. It deliberately withdrew its automatic
+load/unload pipeline. This fork puts one back, because the reasons it was
+withdrawn do not apply to this machine — see
+[Why this fork can do what upstream withdrew](#why-this-fork-can-do-what-upstream-withdrew).
+Mostly I'm experimenting with features that are very dependent on my current platform.
 
-Both at the same time, over a single USB cable (+ 24 V motor power) — something neither the stock standalone firmware nor the community host-macro configs can do on their own.
+> **Nothing in this fork has run on hardware yet.** Every distance, duration
+> and threshold in the load/unload pipeline is a commented placeholder. The
+> firmware has not even been compiled — it builds only on a Klipper host.
+> Treat this as a design under construction, not a release.
+
+## Contents
+
+- [Features](#features)
+- [TODO](#todo)
+- [Hardware](#hardware)
+- [Why this fork can do what upstream withdrew](#why-this-fork-can-do-what-upstream-withdrew)
+- [How the load pipeline works](#how-the-load-pipeline-works)
+- [Changes to upstream](#changes-to-upstream)
+- [Install & update](#install--update)
+- Everything below that is upstream's documentation, lightly amended.
+
+## Features
+
+- [x] Autonomous in-firmware auto-feed (inherited from upstream)
+- [x] Board runs as a standard Klipper USB MCU (inherited)
+- [x] External Feed/Retract buttons on PA2/PA3, handled in firmware so they
+      keep working with Klipper down
+- [x] Mellow MDM module connected on PA4/PA5 — presence event plus a free-running
+      encoder pulse counter in `lll_state`
+- [x] Protocol version handshake — a mismatched host/firmware pair refuses to
+      start instead of silently misparsing
+- [x] Three-phase pulsed load (push, assist, handoff)
+- [x] Sensor-driven unload with an MDM-measured final margin
+- [x] MDM/Roadrunner differential monitoring across the long bowden
+- [x] Hardware-agnostic `[buffer_manager]` section behind a backend seam
+- [x] English throughout (upstream is French)
+- [ ] **Validated on hardware — nothing past this line is proven**
+- [ ] Firmware compiled
+- [ ] Feed rates, distances and thresholds measured
+- [ ] `mdm_mm_per_count` confirmed against the Roadrunner
+- [ ] Second backend (e.g. BTT EBB42) — the seam exists, no implementation
+
+## TODO
+
+- Bench everything. See the Verification section of
+  [docs/PORT_RUNBOOK.md](docs/PORT_RUNBOOK.md).
+- Confirm the PB12/PB13 board-level pull-up assumption with a multimeter. The
+  external buttons on PA2/PA3 enable an internal pull-up and the internal pair
+  does not; that asymmetry is inherited from the old fork and inferred, never
+  measured.
+- Confirm MDM presence polarity (assumed active-low) once it is wired.
+- Measure real forward and back feed rates. `assist_speed` is currently
+  inherited from an unrelated probe move and is almost certainly too slow.
+- Decide whether `differential_action` graduates from `warn` to `error`.
+- Document the mcu-updater flow properly once settled.
+
+## Hardware
+
+```
+Filamentalist V3 rewinder -> buffer -> MDM (on the buffer arm)
+    -> long reverse bowden -> Roadrunner -> short bowden
+    -> Extruder -> toolhead switch -> hotend
+```
+
+| Part | Role |
+|---|---|
+| [Filamentalist V3](https://github.com/Carrot-collective/Filamentalist_Rewinder/tree/main/Filamentalist_FV3_Rewinder) | Passive rewinder — takes back retracted filament |
+| Mellow FLY LLL Buffer Plus | Buffer and feed motor; runs this firmware |
+| Mellow MDM | Encoder module on the buffer arm — presence and motion |
+| [Roadrunner](https://github.com/EiNSTeiN-/roadrunner-filament-sensor/) | High-resolution filament sensor before the extruder |
+| Toolhead switch | Plain switch after the extruder gear |
+
+**The MDM and the Roadrunner bracket the long bowden**, which is most of the
+path. That is the point: comparing them reveals filament moving at one end but
+not the other — buckling *inside* the bowden, which neither sensor can see on
+its own.
+
+Whichever sensor the filament tip has **not yet passed** is the one that can
+still measure it. That single idea drives the whole design — the MDM measures
+the early load and the late unload, the Roadrunner measures the middle.
+
+### MDM encoder scale
+
+The MDM ships three printable encoder disks. The published "minimum detection
+distance" is travel per **full segment cycle**, and the firmware counts **both**
+edges — so one count is half that figure:
+
+| Disk | Vendor distance | Edges/rev | `mdm_mm_per_count` |
+|---|---|---|---|
+| 3-segment | 5.8 mm | 6 | 2.90 mm |
+| 5-segment *(installed)* | 3.5 mm | 10 | **1.75 mm** |
+| 10-segment | 1.73 mm | 20 | 0.865 mm |
+
+Segments times distance is constant at about 17.4 mm — the filament travel per
+disk revolution, which cross-checks the reading. **Do not enter the vendor
+figure directly**; that makes every MDM distance read twice too long.
+
+## Why this fork can do what upstream withdrew
+
+Upstream shelved its automatic pipeline citing three things: no toolhead
+cutter, no passive respoolers, and fragility across a splitter/merger. Their
+prototype needed two sensors *plus* a measured detector-to-splitter distance —
+"that single distance is the whole calibration."
+
+This machine differs on all three:
+
+- **No splitter.** Six lanes, six toolheads, 1:1. The post-splitter detector
+  and the calibrated tail do not exist here, and the calibration goes with
+  them.
+- **Passive respoolers present.** The Filamentalist V3 is precisely the
+  missing equipment upstream named.
+- **The cutter concern is defused, not solved.** A mushroomed tip still forms,
+  but it only ever travels back up its own dedicated path and never negotiates
+  a merger junction, which is one reason to introduce unreliable loads. On a
+  toolchanger, when you have only one filament path per toolhead and loading/unloading
+  actions are manually managed this is not the same type of concern.
+
+In upstream's own words: *"If your setup has a toolhead cutter and passive
+rewinders, the automatic path is realistic with what this repo ships."*
+
+## How the load pipeline works
+
+| Phase | What happens | Measured by |
+|---|---|---|
+| **A — push** | Buffer jogs in short bounded pulses. Pulsed on purpose: a continuous push overshoots and buckles at any unguided gap. Cold-safe. | **MDM only** — filament has not reached the Roadrunner yet |
+| **B — assist** | Extruder pulls while the buffer keeps pushing, until the toolhead switch confirms the gear grabbed. Needs heat. | Roadrunner, plus the differential check |
+| **C — handoff** | Buffer returns to firmware autonomy; `loaded_gcode` runs. | — |
+
+Unload reverses it: optional tip shaping (there is no cutter), a synchronized
+retract until the toolhead switch and then the Roadrunner clear, and a final
+margin measured with the **MDM** — because once the tip passes the Roadrunner,
+nothing threads its wheel and it can no longer measure anything.
+
+Loading is refused unless the lane's own extruder is Klipper's **active**
+extruder, so a docked tool can never be driven by mistake.
+
+## Changes to upstream
+
+- `inform` (PA2/PA3 outputs signalling a non-Klipper mainboard) **deleted** —
+  redundant under Klipper, which already receives `EV_BUTTON`.
+- PA2/PA3 reclaimed as **external Feed/Retract buttons**, feeding the same
+  firmware state machine as the internal pair.
+- PA4/PA5 reclaimed as the **MDM module**. Both retired IOEXT channel pairs
+  become permanently-refusing holes, so channel indices stay a stable contract
+  for anyone's existing config.
+- `lll_state` extended with `mdm_present`, `mdm_count` and `proto`.
+- New host module `klippy/extras/buffer_manager.py` — the load/unload pipeline,
+  behind a backend seam so the board can change later.
+- Comments and user-facing strings translated to English.
+
+Byte-identical parity with upstream is **not** a goal. `upstream/main` is kept
+as a remote-tracking branch for reading their diffs and porting deliberately,
+rather than for merging.
+
+## Install & update
+
+Firmware is **not** built in this repo. `src/buffer.c` is copied into a Klipper
+tree on the Klipper host (a Raspberry Pi) and built there — see
+[CLAUDE.md](CLAUDE.md) for the exact commands, and upstream's Installation
+section below for the one-time Katapult bootloader setup, which is unchanged.
+
+Updates on this machine go through **mcu-updater** rather than the
+`install.sh` / `uninstall.sh` scripts upstream ships. Those scripts are left in
+the tree for now but are not the supported path here.
+
+Target: STM32F072, 8 KiB bootloader offset (application address `0x8002000`,
+must match Katapult), 8 MHz crystal, USB on PA11/PA12.
 
 ---
 
@@ -459,7 +627,7 @@ try it on yours, **please tell us how it went** — we are genuinely asking:
 Don't hesitate — no report is too small, and none of them will be met with
 anything but gratitude.
 
-## Language note
+## Language note (upstream)
 
 The shipped sources are **byte-identical** to the deployment validated in production on the reference setup — that is the core guarantee of this repo, backed by the published SHA-256 fingerprints. As a consequence, some runtime messages and code comments are in **French**. Translations are welcome as PRs, but be aware they would break the byte-for-byte identity with the deployed code — which is why the shipped files themselves are left untouched.
 

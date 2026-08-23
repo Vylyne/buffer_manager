@@ -64,6 +64,126 @@ role: parked
 #role: parked
 
 # --------------------------------------------------------------------------
+# Load / unload pipeline (buffer_manager)
+#
+# Drives filament from the buffer to the extruder in three phases:
+#   A PUSH    buffer jogs in short bounded pulses until the Roadrunner sees
+#             filament. Pulsed on purpose - a continuous push overshoots and
+#             buckles at any unguided gap in the path. Cold-safe.
+#   B ASSIST  the extruder pulls while the buffer keeps pushing, until the
+#             post-extruder switch confirms the gear actually grabbed.
+#             Requires the extruder above min_extrude_temp.
+#   C HANDOFF buffer returns to firmware autonomy, loaded_gcode runs.
+#
+# EVERY DISTANCE AND DURATION BELOW IS A PLACEHOLDER. None of it has run on
+# hardware. Measure on your own machine before trusting any of it.
+#
+# Omit roadrunner_sensor + post_extruder_pin (both, together) to fall back to
+# the sensorless arm-settle heuristic instead of the three-phase pipeline.
+# --------------------------------------------------------------------------
+#[buffer_manager lll]
+#lane: lll                  # the [lll_buffer] section this drives
+#extruder: extruder         # extruder this lane's E-moves target. On a
+#                           #   toolchanger this MUST name the lane's own
+#                           #   extruder: loading is refused unless it is
+#                           #   Klipper's active extruder, so a docked tool
+#                           #   can never be driven by mistake.
+#roadrunner_sensor:         # name of the [high_resolution_filament_sensor]
+#                           #   before the extruder
+#post_extruder_pin:         # raw switch pin after the extruder gear
+#
+#pulse_ms: 100              # Phase A pulse width. Matches the Roadrunner's
+#                           #   own 100 ms refresh - sampling faster gains
+#                           #   nothing.
+#stall_mm: 0.5              # min Roadrunner travel per pulse to count as
+#                           #   progress
+#stall_count: 3             # consecutive stalled pulses before failing
+#assist_mm: 30              # Phase B extruder pull distance
+#assist_speed: 300          # mm/min. Borrowed from an unrelated probe move -
+#                           #   almost certainly wants raising once benched.
+#load_timeout: 180
+#
+# --- MDM encoder scale ------------------------------------------------------
+# The MDM sits on the buffer arm; the Roadrunner sits near the toolhead. They
+# bracket the long reverse bowden, so comparing them reveals filament moving
+# at one end but not the other - i.e. buckling INSIDE the bowden, which
+# neither sensor can see alone.
+#
+# The firmware counts BOTH edges, so one count is half a segment cycle. Do not
+# enter the vendor's "minimum detection distance" directly - that is the full
+# cycle, and using it makes every MDM distance read 2x too long:
+#
+#   Disk         vendor distance   edges/rev   mdm_mm_per_count
+#   3-segment        5.8 mm            6           2.90
+#   5-segment        3.5 mm           10           1.75   <- default
+#   10-segment       1.73 mm          20           0.865
+#
+# (Cross-check: segments x distance is constant at ~17.4 mm, the filament
+# travel per disk revolution.)
+#
+# Resolution limit: one count is the finest movement the MDM can resolve, so
+# this comparison cannot work per-pulse. It needs a rolling window long enough
+# to accumulate several counts - roughly 17.5 mm of travel on the 5-segment
+# disk, ~29 mm on the 3-segment.
+#
+# Both encoders are friction-coupled to the filament, so either can slip, and
+# if they slip together the check sees nothing wrong. Treat a disagreement as
+# "something is wrong somewhere", not as proof of which end failed, and keep
+# the thresholds generous.
+#mdm_mm_per_count: 1.75
+#
+# Windowed comparison, NOT per-pulse: one count is the finest movement the
+# MDM can resolve, so within a single ~100 ms pulse it usually has not
+# ticked at all and a per-pulse check would false-positive constantly.
+# ~17.5 mm is about 10 counts on the 5-segment disk (~29 mm on 3-segment).
+#differential_window_mm: 17.5
+#differential_tolerance: 0.5    # fraction of the window the two ends may
+#                               #   disagree by. Generous on purpose: real
+#                               #   buckling shows up as near-total
+#                               #   divergence, not a subtle percentage.
+#differential_action: warn      # warn | error. Defaults to warn - this
+#                               #   heuristic has never run on hardware,
+#                               #   and a disagreement does not say WHICH
+#                               #   end is at fault. Switch to error once
+#                               #   you trust it on your machine.
+# ----------------------------------------------------------------------------
+
+# --------------------------------------------------------------------------
+# Unload (sensor pipeline). Reverses the load: optional tip shaping (there is
+# no cutter, so the tip is shaped rather than cut), then a synchronized
+# retract - the extruder pulls while the buffer runs back, because an
+# extruder pulling alone against the whole path slips - until the toolhead
+# switch clears and then the Roadrunner does.
+#
+# The final margin is measured with the MDM, not the Roadrunner: once the
+# tip passes the Roadrunner nothing threads its wheel, so its position can
+# no longer advance. The tip is by then between the Roadrunner and the
+# buffer, so the MDM is the sensor that can still see it.
+#
+# There is no splitter in this setup (6 lanes, 6 toolheads, 1:1), so the
+# calibrated post-splitter tail upstream needed does not exist here.
+# --------------------------------------------------------------------------
+#tip_forming_gcode:            # runs before the retract; empty by default
+#unload_pulse_mm: 2.0          # extruder retract per pulse
+#unload_retract_speed: 900     # mm/min
+#unload_clear_mm: 15.0         # MDM-measured final margin past the extruder
+#unload_clear_pulses: 10       # hard bound on that final margin
+#unload_timeout: 90
+#unloaded_gcode:
+#    M117 unloaded
+#unload_failed_gcode:
+#    M117 unload FAILED
+#
+#loaded_gcode:
+#    M117 filament at extruder
+#load_failed_gcode:
+#    M117 load FAILED
+#
+# The pipeline hears about arm/MDM events through lll_buffer's event_gcode
+# hook, so the lane above needs this bridge line in ITS event_gcode:
+#     BUFFER_LOAD_EVENT LANE=lll NAME={event.name} VALUE={event.value}
+
+# --------------------------------------------------------------------------
 # Optional: entrance runout -> pause the print
 # The firmware already stops the buffer motor locally on entrance runout
 # (ENTRANCE function). This block additionally pauses the PRINT on the

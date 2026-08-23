@@ -49,6 +49,10 @@ LLL_QUERY LANE=lll
 | `present` | 1 = filament détecté à l'entrée de la carte |
 | `diag` | 1 = ligne DIAG du driver active (si fonction diag allumée) |
 | `cfgerr` | 1 = une commande de config a été refusée depuis le dernier déblocage (regardez la console) |
+| `mdm_present` | 1 = filament détecté au module MDM (PA4, bras du buffer) — polarité non vérifiée au bench |
+| `mdm_count` | compteur d'impulsions MDM `uint32` libre (PA5) ; wrap, à diffèrer avec une arithmétique non signée wrap-safe, comme pour la `position` du Roadrunner |
+
+Le message d'état de la carte porte aussi une version de protocole filaire (`proto`), non montrée dans la ligne console ci-dessus : `lll_buffer.py` la compare à sa propre constante au démarrage et refuse de se connecter en cas de désaccord (message nommant les deux versions), plutôt que de risquer un mauvais parsing d'un `lll_state` dont la forme a changé sous ses pieds.
 
 ---
 
@@ -119,10 +123,9 @@ LLL_ENABLE LANE=lll FUNC=led EN=1
 | `run_max` | durée max d'un `LLL_RUN` (ms) | 1000-60000 | 30000 |
 | `host_alive` | garde-fou perte d'hôte : 0=off, sinon délai ms (coupe les mouvements commandés si Klipper ne parle plus ; l'autonomie continue) | 0 ou 3000-60000 | 0 |
 | `gate_by_role` | 1 = boutons inactifs quand la lane n'est pas active | 0/1 | 0 |
-| `inform` | sorties « j'ai appuyé » vers PA2/PA3 (comportement d'origine Mellow) | 0/1 | 1 |
 | `diag_action` | sur défaut driver : 0=signaler seulement, 1=stopper et verrouiller | 0/1 | 0 |
 | `diag_polarity` | sens électrique de la ligne DIAG (à déterminer au bench) | 0/1 | 0 |
-| `event_mask` | filtre des événements poussés (127 = tous) | 0-127 | 15 |
+| `event_mask` | filtre des événements poussés (255 = tous) | 0-255 | 15 |
 ```
 LLL_SET LANE=lll PARAM=speed VALUE=60000
 → LLL lll: speed=60000 (applied=60000)
@@ -193,12 +196,14 @@ Activer d'abord : `LLL_ENABLE LANE=<lane> FUNC=ioext EN=1`
 
 | CH | Broche | Analogique | Verrou |
 |---|---|---|---|
-| 0 / 1 | PA4 / PA5 (connecteur IO) | ✅ | non |
+| 0 / 1 | *indisponible* — repris par le module MDM (T3, PA4/PA5) | — | toujours refusé |
 | 2 / 3 | PB10 / PB11 (connecteur IO) | — | non |
-| 4 / 5 | PA2 / PA3 (EXT) | ✅ | 🔒 + libérer `inform` |
+| 4 / 5 | *indisponible* — repris par les boutons externes Feed/Retract (T2, PA2/PA3) | — | toujours refusé |
 | 6 / 7 | PB5 / PB6 | — | fonction `mbsig` éteinte |
 | 8 / 9 | PA8 / PA15 (LED) | — | 🔒 + fonction `led` éteinte |
 | 10 / 11 | PA0 / PA1 (VIN / temp carte) | ✅ | 🔒 + fonction `adc` éteinte |
+
+Les canaux 0/1 et 4/5 gardent leur index (jamais renuméroté — indices = contrat host publié, voir runbook §0) mais tout `LLL_IO_CFG`/`LLL_IO_READ` dessus est refusé inconditionnellement, `LLL_UNLOCK` compris : PA4/PA5 sont maintenant les entrées présence/mouvement MDM et PA2/PA3 les boutons externes, ni l'un ni l'autre n'est plus atteignable via IOEXT.
 
 ### `LLL_UNLOCK LANE=<lane> KEY=0xDEB1`
 Déverrouille les canaux 🔒 **pour la session** (volontairement non persistant : utiliser une broche non validée doit rester un acte conscient).
@@ -239,7 +244,7 @@ role: parked                # RECOMMANDÉ multi-lanes : chaque carte démarre
 #    PAUSE
 #  {% endif %}
 ```
-`event_gcode` reçoit `event.name` (`ecode_set`, `error_cleared`, `present`, `diag`, `button`, `arm`, `role`), `event.code`, `event.value`, `event.lane` — réaction en ~20-50 ms. Les événements `button/arm/role` nécessitent `LLL_SET PARAM=event_mask VALUE=127`.
+`event_gcode` reçoit `event.name` (`ecode_set`, `error_cleared`, `present`, `diag`, `button`, `arm`, `role`, `mdm`), `event.code`, `event.value`, `event.lane` — réaction en ~20-50 ms. Les événements `button/arm/role` nécessitent `LLL_SET PARAM=event_mask VALUE=255` (255 = tout ; `arm` seul est le bit 5 = `0x20`, donc `event_mask VALUE=47` (`0x2F`) pour l'ajouter au défaut seul ; `mdm` est le bit 7 = `0x80`, éteint par défaut aussi — `VALUE=143` (`0x8F`) pour MDM+défaut).
 
 **Pour les macros** : tout l'état est dans `printer["lll_buffer <lane>"]` (mêmes champs que LLL_QUERY + `idle` compatible + `last_event`). Un `LLL_QUERY` force un rafraîchissement immédiat.
 

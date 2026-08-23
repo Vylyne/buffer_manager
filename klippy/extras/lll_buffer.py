@@ -1,28 +1,38 @@
-# Mellow LLL Plus buffer — extra Klippy CANONIQUE v1 (firmware runtime-toggleable)
+# Mellow LLL Plus buffer -- CANONICAL v1 Klippy extra (runtime-toggleable firmware)
 #
-# S'apparie avec src/buffer.c canonique v1. Les format strings ci-dessous
-# doivent rester BYTE-IDENTIQUES au bloc PROTOCOLE de buffer.c.
+# Pairs with the canonical v1 src/buffer.c. The format strings below must
+# stay BYTE-IDENTICAL to buffer.c's PROTOCOL block.
 #
-# Back-compat préservée avec les macros déployées :
-#   - méthode set_idle(v)  (appelée par SET_ACTIVE_LANE)
-#   - gcode LLL_SET_IDLE / LLL_QUERY / LLL_CLEAR_ERROR / LLL_JOG (mêmes params)
-#   - get_status garde les clés 'idle', 'error', 'feeding'
+# Back-compat preserved with the deployed macros:
+#   - method set_idle(v)  (called by SET_ACTIVE_LANE)
+#   - gcode LLL_SET_IDLE / LLL_QUERY / LLL_CLEAR_ERROR / LLL_JOG (same params)
+#   - get_status keeps the 'idle', 'error', 'feeding' keys
 #
-# Replay (fix sécurité #7) :
-#   - options printer.cfg (role/feed_mode statiques) -> mcu.add_config_cmd
-#     (rejoués dans la séquence config, AVANT ready)
-#   - tweaks runtime (LLL_SET/LLL_ENABLE/...) -> [save_variables] si présent,
-#     ré-appliqués à klippy:connect
+# Replay (safety fix #7):
+#   - printer.cfg options (static role/feed_mode) -> mcu.add_config_cmd
+#     (replayed in the config sequence, BEFORE ready)
+#   - runtime tweaks (LLL_SET/LLL_ENABLE/...) -> [save_variables] if present,
+#     re-applied at klippy:connect
 #
-# Config :
+# Config:
 #   [lll_buffer lll]
-#   mcu: lll                  # nom du [mcu] de la carte
-#   #role: active             # active|parked|standby (défaut compilé: active)
+#   mcu: lll                  # name of the board's [mcu]
+#   #role: active             # active|parked|standby (compiled default: active)
 #   #feed_mode: auto          # auto|semi_auto|semi_manual|manual
 import logging
 import threading
 import json as _json
 from urllib import request as _urlreq
+
+# Wire protocol version (T4). Must equal src/buffer.c's LLL_PROTO_VERSION;
+# checked against the firmware's `proto` field (in lll_state) at
+# klippy:connect. Bump BOTH together on any change to the meaning of a
+# command/event/param wire field -- including one that leaves a format
+# string's TEXT unchanged (reassigned ev/func/key id, reordered enum, a
+# changed bit layout). Klipper's MCU dictionary lookup already rejects a
+# format-string text mismatch at identify time on its own; it cannot catch a
+# same-shape field whose meaning silently changed, which is what this is for.
+PROTOCOL_VERSION = 1
 
 FUNC_IDS = {'feed': 0, 'buttons': 1, 'mbsig': 2, 'entrance': 3, 'tmc': 4,
             'move': 5, 'diag': 6, 'led': 7, 'adc': 8, 'telem': 9, 'ioext': 10}
@@ -34,11 +44,11 @@ MODE_NAMES = {v: k for k, v in MODES.items()}
 ECODES = {0: 'none', 1: 'feed_timeout', 2: 'back_timeout', 3: 'diag_fault',
           4: 'host_alive', 5: 'clear_pending'}
 EVENTS = {0: 'ecode_set', 1: 'error_cleared', 2: 'present', 3: 'diag',
-          4: 'button', 5: 'arm', 6: 'role'}
-# nom de param "plat" -> (func, key)
+          4: 'button', 5: 'arm', 6: 'role', 7: 'mdm'}
+# "flat" param name -> (func, key)
 PARAMS = {
     'feed_timeout':  (0, 0), 'back_timeout': (0, 1),
-    'gate_by_role':  (1, 0), 'inform':       (1, 1),
+    'gate_by_role':  (1, 0),
     'irun':          (4, 0), 'ihold':        (4, 1), 'iholddelay': (4, 2),
     'mres':          (4, 3), 'stealth':      (4, 4), 'standstill': (4, 5),
     'tpowerdown':    (4, 6), 'speed':        (4, 7),
@@ -58,13 +68,13 @@ class LLLBuffer:
         self.mcu = self.printer.lookup_object('mcu ' + config.get('mcu'))
         self.gcode = self.printer.lookup_object('gcode')
         self.reactor = self.printer.get_reactor()
-        # options statiques (rejouées via add_config_cmd, séquence config)
+        # static options (replayed via add_config_cmd, config sequence)
         self.cfg_role = config.getchoice('role', {k: k for k in ROLES},
                                          'active')
         self.cfg_mode = config.getchoice('feed_mode', {k: k for k in MODES},
                                          'auto')
-        # enable: feed,led / disable: buttons — funcs (dés)activés dès la
-        # séquence config (fix #7 complet pour la config statique)
+        # enable: feed,led / disable: buttons -- funcs (de)activated right
+        # from the config sequence (full fix #7 for static config)
         self.cfg_enable = [f.strip().lower()
                            for f in config.get('enable', '').split(',')
                            if f.strip()]
@@ -75,21 +85,22 @@ class LLLBuffer:
             if f not in FUNC_IDS:
                 raise config.error("lll_buffer %s: unknown func '%s'"
                                    % (self.name, f))
-        # cadence du poll d'état (keepalive) — doit rester < host_alive si activé
+        # state poll cadence (keepalive) -- must stay < host_alive if enabled
         self.poll_interval = config.getfloat('poll_interval', 1.5,
                                              minval=0.3, maxval=30.)
-        # hook événementiel : gcode déclenché à CHAQUE event push firmware
-        # (réaction ~20-50 ms au lieu d'attendre le poll). Contexte jinja :
+        # event hook: gcode triggered on EVERY firmware event push
+        # (~20-50 ms reaction instead of waiting for the poll). Jinja context:
         # event.name / event.code / event.value / event.lane
         gcode_macro = self.printer.load_object(config, 'gcode_macro')
         self.has_event_gcode = config.get('event_gcode', None) is not None
         self.event_template = gcode_macro.load_template(config, 'event_gcode',
                                                         '')
         self._in_event_gcode = False
-        # état vu par get_status
+        # state seen by get_status
         self.state = {'role': 'active', 'mode': 'auto', 'error': 0,
                       'ecode': 'none', 'feeding': 0, 'running': 0, 'arm': 0,
                       'present': 0, 'diag': 0, 'cfgerr': 0, 'idle': 0,
+                      'mdm_present': 0, 'mdm_count': 0, 'proto': 0,
                       'last_event': '', 'filament': {}}
         self._prev_error = 0
         self._query_busy = False
@@ -124,15 +135,15 @@ class LLLBuffer:
                 ('LLL_IO_WRITE', self.cmd_IO_WRITE, 'Write an IOEXT dout/pwm'),
                 ('LLL_IO_READ', self.cmd_IO_READ, 'Read an IOEXT channel')]:
             self.gcode.register_mux_command(cmd, 'LANE', self.name, fn, desc=d)
-        # commande GLOBALE (pas mux) : détection de la lane physiquement
-        # chargée par sonde du bras (une seule instance l'enregistre ; le
-        # handler énumère toutes les lanes au runtime)
+        # GLOBAL command (not mux): detects the lane physically loaded by
+        # probing the arm (only one instance registers it ; the
+        # handler enumerates all lanes at runtime)
         try:
             self.gcode.register_command(
                 'LLL_DETECT_LOADED', self.cmd_DETECT_LOADED,
                 desc='Probe which lane is physically loaded (arm sensors)')
         except Exception:
-            pass                         # déjà enregistrée par une autre lane
+            pass                         # already registered by another lane
 
     # ------------------------------------------------------------------
     def _build_config(self):
@@ -140,8 +151,8 @@ class LLLBuffer:
         mcu = self.mcu
         self.role_cmd = mcu.lookup_command("lll_role role=%c", cq=cq)
         self.set_idle_cmd = mcu.lookup_command("lll_set_idle value=%c", cq=cq)
-        # lll_arm ACK toujours -> query wrapper OBLIGATOIRE : un ack orphelin
-        # serait volé par la prochaine commande attendant 'lll_ack'
+        # lll_arm always ACKs -> query wrapper MANDATORY: an orphan ack
+        # would be stolen by the next command waiting on 'lll_ack'
         self.arm_cmd = mcu.lookup_query_command(
             "lll_arm", "lll_ack func=%c key=%c val=%u ok=%c", cq=cq)
         self.jog_cmd = mcu.lookup_command("lll_jog dir=%c ms=%u", cq=cq)
@@ -153,7 +164,8 @@ class LLLBuffer:
         self.query_cmd = mcu.lookup_query_command(
             "lll_query",
             "lll_state role=%c mode=%c error=%c ecode=%c feeding=%c"
-            " running=%c arm=%c present=%c diag=%c cfgerr=%c", cq=cq)
+            " running=%c arm=%c present=%c diag=%c cfgerr=%c"
+            " mdm_present=%c mdm_count=%u proto=%c", cq=cq)
         self.enable_cmd = mcu.lookup_query_command(
             "lll_enable func=%c en=%c",
             "lll_ack func=%c key=%c val=%u ok=%c", cq=cq)
@@ -174,15 +186,15 @@ class LLLBuffer:
             "lll_io ch=%c val=%u ok=%c", cq=cq)
         self.mcu.register_serial_response(self._handle_event,
                                           "lll_event ev=%c a=%u")
-        # replay des options statiques dans la séquence config (fix #7)
+        # replay the static options in the config sequence (fix #7)
         if self.cfg_role != 'active':
             self.mcu.add_config_cmd("lll_role role=%d" % ROLES[self.cfg_role])
         if self.cfg_mode != 'auto':
             self.mcu.add_config_cmd("lll_mode func=0 level=%d"
                                     % MODES[self.cfg_mode])
-        # NB : chaque lll_enable/lll_mode config déclenche un lll_ack firmware
-        # sans waiter -> 1 warning bénin 'got {...}' dans klippy.log par
-        # commande à la configuration (dispatch par nom, vérifié inoffensif)
+        # NB: each lll_enable/lll_mode config command triggers a firmware
+        # lll_ack with no waiter -> 1 benign 'got {...}' warning in klippy.log
+        # per command at config time (dispatched by name, confirmed harmless)
         for f in self.cfg_enable:
             self.mcu.add_config_cmd("lll_enable func=%d en=1" % FUNC_IDS[f])
         for f in self.cfg_disable:
@@ -190,6 +202,7 @@ class LLLBuffer:
 
     # ------------------------------------------------------------------
     def _connect(self):
+        self._check_protocol_version()
         self._replay_saved()
         sv = self.printer.lookup_object('save_variables', None)
         if sv is not None:
@@ -198,11 +211,34 @@ class LLLBuffer:
                 self.state['filament'] = fil
         self.reactor.update_timer(self.poll_timer, self.reactor.NOW)
 
+    # T4: first exchange with the board -> verifies the firmware speaks the
+    # same protocol as this module BEFORE any replay/poll. A mismatch on a
+    # field that does not change the format string's shape (a reassigned
+    # event/func/key id, a reordered enum) would slip through Klipper's MCU
+    # dictionary lookup without raising an error -> this counter is the only
+    # net for that case ; refuse to start rather than silently misparsing.
+    def _check_protocol_version(self):
+        try:
+            self._query_busy = True
+            p = self.query_cmd.send([])
+        finally:
+            self._query_busy = False
+        fw_proto = p['proto']
+        if fw_proto != PROTOCOL_VERSION:
+            raise self.printer.config_error(
+                "lll_buffer %s: protocol version mismatch - firmware speaks"
+                " proto=%d, this klippy/extras/lll_buffer.py speaks"
+                " proto=%d. Reflash the firmware from this repo's src/"
+                " buffer.c or update lll_buffer.py to match - refusing to"
+                " start rather than silently misparsing lll_state."
+                % (self.name, fw_proto, PROTOCOL_VERSION))
+        self._update_state(p)
+
     def _filament_var(self):
         return ('lll_%s_filament' % self.name).lower()
 
     def _saved_var(self):
-        # save_variables refuse les majuscules dans les noms
+        # save_variables refuses uppercase in names
         return ('lll_%s_tweaks' % self.name).lower()
 
     def _profiles_var(self):
@@ -218,8 +254,8 @@ class LLLBuffer:
         sv.cmd_SAVE_VARIABLE(cmd)
         return True
 
-    # applique un tweak (clé du dict persisté) ; retourne le dict réponse
-    # firmware (ou None pour les commandes sans ack)
+    # applies a tweak (key of the persisted dict) ; returns the firmware
+    # response dict (or None for commands with no ack)
     def _apply_tweak(self, k, v):
         if k.startswith('param_'):
             func, key = PARAMS[k[6:]]
@@ -240,8 +276,8 @@ class LLLBuffer:
         tweaks = sv.allVariables.get(self._saved_var(), {})
         if not isinstance(tweaks, dict):
             return
-        # try PAR ITEM : une clé périmée ne doit pas avorter le reste
-        # (notamment le role, replay en dernier par l'ordre alphabétique)
+        # try PER ITEM: a stale key must not abort the rest
+        # (notably role, replayed last by alphabetical order)
         for k, v in sorted(tweaks.items()):
             try:
                 p = self._apply_tweak(k, v)
@@ -264,10 +300,10 @@ class LLLBuffer:
             logging.exception("lll_buffer %s: persist failed", self.name)
 
     # ------------------------------------------------------------------
-    # PROFILS NOMMÉS (façon BEACON_MODEL_SELECT) : un profil = un bundle de
-    # tweaks (mode/params/enables — PAS le rôle : il appartient au système de
-    # swap). LOAD applique SES réglages et les persiste comme état courant ;
-    # ce qu'un profil ne définit pas reste tel quel.
+    # NAMED PROFILES (BEACON_MODEL_SELECT style): a profile = a bundle of
+    # tweaks (mode/params/enables -- NOT role: that belongs to the swap
+    # system). LOAD applies ITS settings and persists them as the current
+    # state ; whatever a profile does not define stays as-is.
     # ------------------------------------------------------------------
     def _get_profiles(self):
         sv = self.printer.lookup_object('save_variables', None)
@@ -279,18 +315,18 @@ class LLLBuffer:
     def cmd_PROFILE_SAVE(self, gcmd):
         profs = self._get_profiles()
         if profs is None:
-            raise gcmd.error("[save_variables] requis dans printer.cfg")
+            raise gcmd.error("[save_variables] required in printer.cfg")
         name = gcmd.get('NAME').lower()
         sv = self.printer.lookup_object('save_variables')
         tweaks = dict(sv.allVariables.get(self._saved_var(), {}))
-        tweaks.pop('role', None)         # le rôle n'entre pas dans un profil
+        tweaks.pop('role', None)         # role does not belong in a profile
         if not tweaks:
-            raise gcmd.error("LLL %s: rien à sauver (aucun réglage posé —"
-                             " utilise LLL_SET/LLL_MODE/LLL_ENABLE d'abord)"
+            raise gcmd.error("LLL %s: nothing to save (no setting applied yet"
+                             " - use LLL_SET/LLL_MODE/LLL_ENABLE first)"
                              % self.name)
         profs[name] = tweaks
         self._sv_write(self._profiles_var(), profs)
-        gcmd.respond_info("LLL %s: profil '%s' sauvé (%s)"
+        gcmd.respond_info("LLL %s: profile '%s' saved (%s)"
                           % (self.name, name,
                              ', '.join('%s=%s' % kv
                                        for kv in sorted(tweaks.items()))))
@@ -298,12 +334,12 @@ class LLLBuffer:
     def cmd_PROFILE_LOAD(self, gcmd):
         profs = self._get_profiles()
         if profs is None:
-            raise gcmd.error("[save_variables] requis dans printer.cfg")
+            raise gcmd.error("[save_variables] required in printer.cfg")
         name = gcmd.get('NAME').lower()
         if name not in profs:
-            raise gcmd.error("LLL %s: profil '%s' inconnu (dispo: %s)"
+            raise gcmd.error("LLL %s: unknown profile '%s' (available: %s)"
                              % (self.name, name,
-                                ', '.join(sorted(profs)) or 'aucun'))
+                                ', '.join(sorted(profs)) or 'none'))
         refused = []
         for k, v in sorted(profs[name].items()):
             try:
@@ -311,24 +347,24 @@ class LLLBuffer:
                 if p is not None and not p.get('ok', 1):
                     refused.append(k)
                 else:
-                    self._persist(k, v)  # devient l'état courant (reboot-safe)
+                    self._persist(k, v)  # becomes the current state (reboot-safe)
             except Exception:
                 logging.exception("lll_buffer %s: profile %s item %s failed",
                                   self.name, name, k)
                 refused.append(k)
         if refused:
-            raise gcmd.error("LLL %s: profil '%s' appliqué PARTIELLEMENT,"
-                             " refusé: %s" % (self.name, name,
+            raise gcmd.error("LLL %s: profile '%s' applied PARTIALLY,"
+                             " refused: %s" % (self.name, name,
                                               ', '.join(refused)))
-        gcmd.respond_info("LLL %s: profil '%s' appliqué (%d réglages)"
+        gcmd.respond_info("LLL %s: profile '%s' applied (%d settings)"
                           % (self.name, name, len(profs[name])))
 
     def cmd_PROFILE_LIST(self, gcmd):
         profs = self._get_profiles()
         if not profs:
-            gcmd.respond_info("LLL %s: aucun profil sauvé" % self.name)
+            gcmd.respond_info("LLL %s: no profiles saved" % self.name)
             return
-        lines = ["LLL %s: %d profil(s)" % (self.name, len(profs))]
+        lines = ["LLL %s: %d profile(s)" % (self.name, len(profs))]
         for name in sorted(profs):
             lines.append("  %s: %s" % (name,
                          ', '.join('%s=%s' % kv
@@ -338,18 +374,18 @@ class LLLBuffer:
     def cmd_PROFILE_DELETE(self, gcmd):
         profs = self._get_profiles()
         if profs is None:
-            raise gcmd.error("[save_variables] requis dans printer.cfg")
+            raise gcmd.error("[save_variables] required in printer.cfg")
         name = gcmd.get('NAME').lower()
         if name not in profs:
-            raise gcmd.error("LLL %s: profil '%s' inconnu" % (self.name, name))
+            raise gcmd.error("LLL %s: unknown profile '%s'" % (self.name, name))
         del profs[name]
         self._sv_write(self._profiles_var(), profs)
-        gcmd.respond_info("LLL %s: profil '%s' supprimé" % (self.name, name))
+        gcmd.respond_info("LLL %s: profile '%s' deleted" % (self.name, name))
 
     # ------------------------------------------------------------------
     def _handle_event(self, params):
-        # ATTENTION : tourne dans le thread série background -> trampoline
-        # vers le reactor avant tout respond_info / mutation d'état
+        # WARNING: runs in the background serial thread -> trampoline
+        # to the reactor before any respond_info / state mutation
         ev, a = params['ev'], params['a']
         self.reactor.register_async_callback(
             lambda e, ev=ev, a=a: self._process_event(ev, a))
@@ -367,10 +403,10 @@ class LLLBuffer:
         elif ev == 3:
             self.gcode.respond_info("LLL %s: DIAG %s"
                                     % (self.name, 'ASSERT' if a else 'clear'))
-        # hook event_gcode (réaction stratégique rapide, ~20-50 ms)
+        # event_gcode hook (fast strategic reaction, ~20-50 ms)
         if not self.has_event_gcode or self._in_event_gcode:
-            return                       # absent ou ré-entrance (event déclenché
-        try:                             # par le hook lui-même) -> skip
+            return                       # absent or re-entrance (event triggered
+        try:                             # by the hook itself) -> skip
             self._in_event_gcode = True
             ctx = self.event_template.create_template_context()
             ctx['event'] = {'name': name, 'code': ev, 'value': a,
@@ -393,6 +429,10 @@ class LLLBuffer:
         s['present'] = p['present']
         s['diag'] = p['diag']
         s['cfgerr'] = p['cfgerr']
+        s['mdm_present'] = p['mdm_present']
+        s['mdm_count'] = p['mdm_count']                 # uint32_t, wraps;
+                                                        # diff wrap-safe (T3)
+        s['proto'] = p['proto']
         s['idle'] = 1 if p['role'] else 0              # compat macros
         if p['error'] and not self._prev_error:        # rising edge = jam
             self.gcode.respond_info(
@@ -402,10 +442,10 @@ class LLLBuffer:
         self._prev_error = p['error']
 
     def _poll(self, eventtime):
-        # poll = keepalive host-alive ; get_status ne send JAMAIS
+        # poll = host-alive keepalive ; get_status NEVER sends
         if self._query_busy:
-            return eventtime + self.poll_interval  # une query gcode est en
-        try:                             # vol : pas 2 waiters 'lll_state'
+            return eventtime + self.poll_interval  # a gcode query is in
+        try:                             # flight: not 2 'lll_state' waiters
             self._query_busy = True
             self._update_state(self.query_cmd.send([]))
         except Exception:
@@ -415,7 +455,7 @@ class LLLBuffer:
         return eventtime + self.poll_interval
 
     # ------------------------------------------------------------------
-    # appelée par SET_ACTIVE_LANE (active -> 0, inactive -> 1) — compat
+    # called by SET_ACTIVE_LANE (active -> 0, inactive -> 1) -- compat
     def set_idle(self, v):
         self.set_idle_cmd.send([1 if v else 0])
         self.state['role'] = 'parked' if v else 'active'
@@ -429,7 +469,7 @@ class LLLBuffer:
         self.state['role'] = 'parked' if v else 'active'
         self.state['idle'] = v
         if v == 0:
-            self._push_active_spool()    # cette lane devient active
+            self._push_active_spool()    # this lane becomes active
 
     def cmd_ROLE(self, gcmd):
         r = gcmd.get('ROLE').lower()
@@ -450,7 +490,7 @@ class LLLBuffer:
         en = gcmd.get_int('EN', minval=0, maxval=1)
         p = self.enable_cmd.send([FUNC_IDS[f], en])
         if not p['ok']:
-            raise gcmd.error("LLL %s: enable %s=%d REFUSED (conflit pins ?)"
+            raise gcmd.error("LLL %s: enable %s=%d REFUSED (pin conflict?)"
                              % (self.name, f, en))
         self._persist('enable_' + f, en)
         gcmd.respond_info("LLL %s: %s %s" % (self.name, f,
@@ -513,8 +553,8 @@ class LLLBuffer:
         gcmd.respond_info("LLL %s: clear requested" % self.name)
 
     def cmd_QUERY(self, gcmd):
-        if self._query_busy:             # poll en vol : évite 2 waiters
-            s = self.state               # 'lll_state' -> répond le cache
+        if self._query_busy:             # poll in flight: avoids 2 waiters
+            s = self.state               # on 'lll_state' -> answer from cache
             gcmd.respond_info(
                 "LLL %s (cache <1.5s): role=%s mode=%s error=%s ecode=%s"
                 " feeding=%s running=%s arm=%s present=%s diag=%s cfgerr=%s"
@@ -527,9 +567,9 @@ class LLLBuffer:
             p = self.query_cmd.send([])
         finally:
             self._query_busy = False
-        self._update_state(p)            # fraîcheur à la demande : une macro
-                                         # peut faire LLL_QUERY puis lire
-                                         # get_status (plus borné par le poll)
+        self._update_state(p)            # freshness on demand: a macro can
+                                         # do LLL_QUERY then read
+                                         # get_status (no longer bounded by the poll)
         gcmd.respond_info(
             "LLL %s: role=%s mode=%s error=%d ecode=%s feeding=%d running=%d"
             " arm=%d present=%d diag=%d cfgerr=%d"
@@ -572,8 +612,8 @@ class LLLBuffer:
         p = self.io_cfg_cmd.send([ch, IO_FUNCS[f], arg])
         if not p['ok']:
             raise gcmd.error(
-                "LLL %s: io_cfg ch%d %s REFUSED (unlock ? conflit module ?"
-                " canal non-ADC ?)" % (self.name, ch, f))
+                "LLL %s: io_cfg ch%d %s REFUSED (unlock? module conflict?"
+                " non-ADC channel?)" % (self.name, ch, f))
         gcmd.respond_info("LLL %s: ch%d = %s" % (self.name, ch, f))
 
     def cmd_IO_WRITE(self, gcmd):
@@ -602,9 +642,9 @@ class LLLBuffer:
                              ' [spool #%d]' % info['spool_id']
                              if info['spool_id'] else ''))
 
-    # pousse la bobine Spoolman de CETTE lane comme bobine active Moonraker
-    # (le décompte de consommation part sur la bonne bobine, par lane).
-    # HTTP en thread démon : jamais bloquant pour le reactor klippy.
+    # push THIS lane's Spoolman spool as Moonraker's active spool
+    # (consumption tracking then counts against the right spool, per lane).
+    # HTTP in a daemon thread: never blocking for the klippy reactor.
     def _push_active_spool(self):
         sid = (self.state.get('filament') or {}).get('spool_id', 0)
         if not sid:
@@ -622,7 +662,7 @@ class LLLBuffer:
                                   self.name)
         threading.Thread(target=worker, args=(sid,), daemon=True).start()
 
-    # helpers de sonde (utilisés par LLL_DETECT_LOADED, toutes lanes)
+    # probe helpers (used by LLL_DETECT_LOADED, all lanes)
     def probe_arm(self):
         if self._query_busy:
             self.reactor.pause(self.reactor.monotonic() + 0.2)
@@ -644,10 +684,10 @@ class LLLBuffer:
 
     # ------------------------------------------------------------------
     # LLL_DETECT_LOADED [MM=10] [EXPECTED=<lane>] [ON_MISMATCH=warn|pause|error]
-    # Sonde la lane physiquement chargée : toutes lanes en standby, petit
-    # retract extrudeur -> SEUL le bras de la lane engagée bouge -> verdict.
-    # Exige un extrudeur >= min_extrude_temp (Klipper bloque E-move à froid
-    # et le filament serait figé dans la meltzone = slip garanti).
+    # Probes which lane is physically loaded: all lanes to standby, a small
+    # extruder retract -> ONLY the engaged lane's arm moves -> verdict.
+    # Requires an extruder >= min_extrude_temp (Klipper blocks a cold E-move,
+    # and the filament would be frozen in the meltzone = guaranteed slip).
     # ------------------------------------------------------------------
     def cmd_DETECT_LOADED(self, gcmd):
         mm = gcmd.get_float('MM', 10., minval=2., maxval=50.)
@@ -657,11 +697,11 @@ class LLLBuffer:
         extruder = self.printer.lookup_object('extruder')
         if not extruder.get_status(eventtime).get('can_extrude', False):
             raise gcmd.error(
-                "LLL probe: extrudeur froid - chauffe au-dessus de"
-                " min_extrude_temp d'abord (ex. M109 S175) puis relance")
+                "LLL probe: extruder cold - heat above min_extrude_temp"
+                " first (e.g. M109 S175) then retry")
         lanes = [obj for _, obj in self.printer.lookup_objects('lll_buffer')]
         if expected and expected not in [o.name for o in lanes]:
-            raise gcmd.error("LLL probe: lane EXPECTED '%s' inconnue"
+            raise gcmd.error("LLL probe: unknown lane EXPECTED '%s'"
                              % expected)
         arms0, saved_roles = {}, {}
         gm_abs = self.printer.lookup_object('gcode_move').get_status(
@@ -672,7 +712,7 @@ class LLLBuffer:
                 arm, role = o.probe_arm()
                 arms0[o.name] = arm
                 saved_roles[o.name] = role
-                o.role_cmd.send([2])     # standby : personne ne compense
+                o.role_cmd.send([2])     # standby: nobody else compensates
             self.gcode.run_script_from_command(
                 "M83\nG1 E-%.1f F300\nM400" % (mm,))
             self.reactor.pause(self.reactor.monotonic() + 0.6)
@@ -683,7 +723,7 @@ class LLLBuffer:
             self.gcode.run_script_from_command(
                 "G1 E%.1f F300\nM400%s" % (mm, "\nM82" if gm_abs else ""))
         finally:
-            for o in lanes:              # restaure les rôles quoi qu'il arrive
+            for o in lanes:              # restore the roles no matter what happens
                 if o.name in saved_roles:
                     try:
                         o.role_cmd.send([saved_roles[o.name]])
@@ -696,19 +736,19 @@ class LLLBuffer:
             self._sv_write('lll_loaded_lane', loaded)
             if expected and loaded != expected:
                 self._probe_fail(gcmd, on_mismatch,
-                                 "attendu '%s', DETECTE '%s'%s"
+                                 "expected '%s', DETECTED '%s'%s"
                                  % (expected, loaded, lane_obj._fil_desc()))
                 return
-            gcmd.respond_info("LLL probe: lane '%s' chargee%s%s"
+            gcmd.respond_info("LLL probe: lane '%s' loaded%s%s"
                               % (loaded, lane_obj._fil_desc(),
-                                 ' - concordance OK' if expected else ''))
+                                 ' - match OK' if expected else ''))
         elif not changed:
             self._probe_fail(gcmd, on_mismatch if expected else 'warn',
-                             "aucun bras n'a bouge (augmente MM=, verifie"
-                             " la temperature et le chargement)")
+                             "no arm moved (increase MM=, check the"
+                             " temperature and the loading)")
         else:
             self._probe_fail(gcmd, on_mismatch if expected else 'warn',
-                             "plusieurs bras ont bouge (%s) - re-essaie"
+                             "several arms moved (%s) - retry"
                              % ', '.join(changed))
 
     def _probe_fail(self, gcmd, action, detail):
@@ -717,8 +757,8 @@ class LLLBuffer:
         if action == 'pause':
             self.gcode.run_script_from_command("PAUSE")
             gcmd.respond_info(
-                "!! FILAMENT CHECK: %s. Charge la bonne lane, verifie avec"
-                " LLL_DETECT_LOADED, puis RESUME." % detail)
+                "!! FILAMENT CHECK: %s. Load the correct lane, verify with"
+                " LLL_DETECT_LOADED, then RESUME." % detail)
         else:
             gcmd.respond_info("LLL probe: %s" % detail)
 
