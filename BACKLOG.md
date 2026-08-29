@@ -8,6 +8,22 @@ session" set, and it is not something to act on unprompted.
 
 Ideas parked for later — not committed to, not scheduled. Newest first.
 
+## 2026-08-26 — Safe redesign of rewind-then-pause
+
+`experimental/phase-c/` prototyped a `rewind_pause` option (pause auto-feed
+after a manual rewind, re-armed by a button click or `LLL_CLEAR_ERROR`) and
+withdrew it: the implementation latched a full `is_error`, which freezes the
+lane's *entire* auto-feed — on an actively-printing lane that means the
+extruder keeps pulling while the buffer stops following, i.e. grinding. The
+folder's own README already names the fix that was never built: inhibit
+only the automatic re-forward after a rewind, without latching an error that
+also blocks the print-feed path. That's a real firmware design task (a new,
+narrower state distinct from `is_error`), not a mechanical port — parking it
+here rather than adopting phase-c's code as-is. See
+`docs/REVIEW_2026-08-26.md`'s phase-c finding for the full trace (it also
+predates this fork's T1–T5 rework entirely, so nothing else in that folder
+carries over cleanly regardless).
+
 ## 2026-08-22 — Dashboard: MDM + load/unload
 
 The dashboard (`dashboard/index.html`) still works as upstream shipped it —

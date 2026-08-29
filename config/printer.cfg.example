@@ -49,6 +49,12 @@ role: parked
 #   Default: empty.
 #poll_interval: 1.5
 #   State refresh / keepalive period in seconds (0.3 - 30). Default: 1.5.
+#moonraker_endpoint: ~/printer_data/comms/moonraker.sock
+#   Where to push this lane's active Spoolman spool (LLL_FILAMENT SPOOL_ID=).
+#   A filesystem path talks to Moonraker's Unix socket directly (JSON-RPC,
+#   no network stack); an http(s):// URL uses the HTTP API instead, for a
+#   setup where Moonraker isn't local or the socket lives somewhere else.
+#   Default: the standard Moonraker socket path.
 #event_gcode:
 #   G-code template run on EVERY event pushed by the board (~20-50 ms
 #   reaction). Jinja context: event.name / event.code / event.value /
@@ -95,13 +101,31 @@ role: parked
 #pulse_ms: 100              # Phase A pulse width. Matches the Roadrunner's
 #                           #   own 100 ms refresh - sampling faster gains
 #                           #   nothing.
-#stall_mm: 0.5              # min Roadrunner travel per pulse to count as
-#                           #   progress
-#stall_count: 3             # consecutive stalled pulses before failing
+#phase_a_stall_pulses: 10   # Phase A only: consecutive pulses with zero MDM
+#                           #   movement before calling it a stall. MDM-based
+#                           #   (the Roadrunner has no filament in it yet) -
+#                           #   much coarser than stall_count below, since one
+#                           #   MDM count is the whole mdm_mm_per_count.
+#stall_mm: 0.5              # Phase B + unload retract: min Roadrunner travel
+#                           #   per pulse to count as progress. NOT used by
+#                           #   phase A - see phase_a_stall_pulses above.
+#stall_count: 3             # Phase B + unload retract: consecutive stalled
+#                           #   pulses before failing. NOT used by phase A.
 #assist_mm: 30              # Phase B extruder pull distance
 #assist_speed: 300          # mm/min. Borrowed from an unrelated probe move -
 #                           #   almost certainly wants raising once benched.
+#assist_max_pulses: 5       # Phase B: assist pulses attempted before failing
+#                           #   if the toolhead switch never confirms a grab.
+#phase_b_run_ms: 4000       # Phase B: fallback backend.run() bound, used only
+#                           #   when phase A produced no learned feed rate.
+#phase_b_timeout: 30        # Phase B: sub-budget (s), bounded by load_timeout.
+#load_settle_time: 1.5      # No-sensor fallback only: how long HALL2 must
+#                           #   stay obstructed before calling it arrived.
 #load_timeout: 180
+#event_mask: 0x2F           # Firmware telemetry mask, must include the arm
+#                           #   bit (0x20) or arrival detection never fires -
+#                           #   default already does. See src/buffer.c's
+#                           #   TELEM(9) comment for the other event bits.
 #
 # --- MDM encoder scale ------------------------------------------------------
 # The MDM sits on the buffer arm; the Roadrunner sits near the toolhead. They
@@ -169,6 +193,9 @@ role: parked
 #unload_clear_mm: 15.0         # MDM-measured final margin past the extruder
 #unload_clear_pulses: 10       # hard bound on that final margin
 #unload_timeout: 90
+#unload_run_ms: 0              # No-sensor fallback only: bounded reverse run
+#                               #   passed to LLL_RUN. 0 lets the firmware's
+#                               #   own run_max_ms bound it instead.
 #unloaded_gcode:
 #    M117 unloaded
 #unload_failed_gcode:

@@ -137,6 +137,8 @@
 
 import logging
 
+logger = logging.getLogger(__name__)
+
 # Load state machine.
 #
 # The dancer arm tells us where the filament is (buffer.c convention,
@@ -148,9 +150,9 @@ import logging
 # Sensor pipeline (T8, used when roadrunner_sensor + post_extruder_pin are
 # both configured):
 PHASE_IDLE = "idle"
-PHASE_A_PUSH = "a_push"        # pulsed buffer-only feed, cold-safe
-PHASE_B_ASSIST = "b_assist"    # buffer + extruder assist, needs heat
-PHASE_ARRIVED = "arrived"      # phase C handoff has run
+PHASE_A_PUSH = "a_push"  # pulsed buffer-only feed, cold-safe
+PHASE_B_ASSIST = "b_assist"  # buffer + extruder assist, needs heat
+PHASE_ARRIVED = "arrived"  # phase C handoff has run
 PHASE_FAILED = "failed"
 
 # No-sensor fallback phases (arm-settle heuristic over the firmware's own
@@ -162,9 +164,13 @@ PHASE_FAILED = "failed"
 PHASE_WAIT_FEED = "wait_feed"
 PHASE_FEEDING = "feeding"
 
-# Phases in which a firmware error should abort the in-flight load.
-LOAD_ACTIVE_PHASES = (PHASE_WAIT_FEED, PHASE_FEEDING, PHASE_A_PUSH,
-                      PHASE_B_ASSIST)
+# Phases in which a firmware error should abort the in-flight load. Split in
+# two because _on_error handles them differently, not for cosmetic reasons:
+# the fallback phases run off a reactor timer and can be failed directly,
+# while the sensor phases run in their own greenlet loop and must be asked to
+# stop via _phase_abort_reason instead (see _check_phase_abort).
+LOAD_FALLBACK_PHASES = (PHASE_WAIT_FEED, PHASE_FEEDING)
+LOAD_SENSOR_PHASES = (PHASE_A_PUSH, PHASE_B_ASSIST)
 
 UNLOAD_IDLE = "idle"
 # No-sensor fallback only (pre-T8 behaviour, unchanged): LLL_RUN back,
@@ -172,14 +178,14 @@ UNLOAD_IDLE = "idle"
 UNLOAD_RUNNING = "running"
 # Sensor pipeline (T9), used when roadrunner_sensor + post_extruder_pin are
 # both configured - mirrors PHASE_A_PUSH/PHASE_B_ASSIST/PHASE_ARRIVED above.
-UNLOAD_TIP_FORM = "tip_form"   # optional tip_forming_gcode
-UNLOAD_RETRACT = "retract"     # synchronized retract: steps 2-3
-UNLOAD_CLEAR = "clear"         # bounded extra retract past extruder entry: step 4
+UNLOAD_TIP_FORM = "tip_form"  # optional tip_forming_gcode
+UNLOAD_RETRACT = "retract"  # synchronized retract: steps 2-3
+UNLOAD_CLEAR = "clear"  # bounded extra retract past extruder entry: step 4
 UNLOAD_DONE = "done"
 UNLOAD_FAILED = "failed"
 
 # Phases in which a firmware error should abort the in-flight unload via
-# the same poll-based abort idiom as LOAD_ACTIVE_PHASES/_check_phase_abort.
+# the same poll-based abort idiom as LOAD_SENSOR_PHASES/_check_phase_abort.
 UNLOAD_ACTIVE_PHASES = (UNLOAD_TIP_FORM, UNLOAD_RETRACT, UNLOAD_CLEAR)
 
 # buffer.c: arm bitfield is H3H2H1 (bit2=hall3, bit1=hall2, bit0=hall1).
@@ -194,13 +200,6 @@ DEFAULT_EVENT_MASK = 0x0F | EV_ARM_BIT
 # lll_param addressing for TELEM(9) key 0 = event_mask.
 FUNC_TELEM = 9
 KEY_EVENT_MASK = 0
-
-# Sentinel a LaneBackend.mdm() implementation returns when its board/
-# firmware has no MDM module at all (as opposed to reading it as absent).
-# Since T3, LllBufferBackend below always has real mdm_present/mdm_count
-# fields to report - this sentinel is here for a hypothetical future
-# backend (e.g. a non-Mellow board) with no MDM hardware, not for this one.
-MDM_NOT_AVAILABLE = (None, None)
 
 
 # ----------------------------------------------------------------------
@@ -248,7 +247,7 @@ class LaneBackend(object):
     def mdm(self):
         """Return (present, counter): MDM presence (bool) and a
         free-running motion pulse counter (int, wraps at uint32), or
-        MDM_NOT_AVAILABLE if this backend/firmware has no MDM module."""
+        (None, None) if this backend/firmware has no MDM module."""
         raise NotImplementedError
 
 
@@ -277,22 +276,24 @@ class LllBufferBackend(LaneBackend):
 
     def jog(self, direction, ms):
         self.gcode.run_script_from_command(
-            "LLL_JOG LANE=%s DIR=%s MS=%d" % (self.lane_name, direction, ms))
+            f"LLL_JOG LANE={self.lane_name} DIR={direction} MS={ms}"
+        )
 
     def run(self, direction, ms):
         self.gcode.run_script_from_command(
-            "LLL_RUN LANE=%s DIR=%s MS=%d" % (self.lane_name, direction, ms))
+            f"LLL_RUN LANE={self.lane_name} DIR={direction} MS={ms}"
+        )
 
     def stop(self):
         # Public surface only: LLL_STOP clears the host run flag and
         # hands autonomy back to the firmware per role/mode.
-        self.gcode.run_script("LLL_STOP LANE=%s" % (self.lane_name,))
+        self.gcode.run_script(f"LLL_STOP LANE={self.lane_name}")
 
     def state(self):
         # get_status()'s eventtime arg is unused by lll_buffer (kept only
         # for parity with Klipper's general status-object convention), so
         # a real timestamp is not needed here.
-        return self.lane.get_status(0.)
+        return self.lane.get_status(0.0)
 
     def mdm(self):
         # T3 added mdm_present / mdm_count to lll_state and to
@@ -303,7 +304,7 @@ class LllBufferBackend(LaneBackend):
         # raw counter; the differencing is T10's job (MDM/Roadrunner
         # buckling detection), not this one's.
         s = self.state()
-        return bool(s.get('mdm_present')), s.get('mdm_count')
+        return bool(s.get("mdm_present")), s.get("mdm_count")
 
     def has_event_gcode(self):
         # Wiring sanity check specific to this backend's event-bridge
@@ -349,15 +350,15 @@ class BufferManager:
         have_pe = post_extruder_pin is not None
         if have_rr != have_pe:
             raise config.error(
-                "buffer_manager %s: roadrunner_sensor and post_extruder_pin"
+                f"buffer_manager {self.name}: roadrunner_sensor and post_extruder_pin"
                 " must both be set together (the three-phase load pipeline"
                 " needs both to detect the phase A/B boundaries), or both"
                 " left unset to use the no-sensor arm-settle fallback"
-                % (self.name,))
+            )
         self.use_sensor_pipeline = have_rr and have_pe
         self.extruder_name = config.get("extruder", "extruder")
-        self.roadrunner = None   # resolved in _connect()
-        self.extruder = None     # resolved in _connect()
+        self.roadrunner = None  # resolved in _connect()
+        self.extruder = None  # resolved in _connect()
 
         # --- EVERY value below this point is an untested placeholder. ---
         # Nothing in this module has run on hardware; see
@@ -372,7 +373,7 @@ class BufferManager:
         # pulse must produce to count as progress. A pulse below this is
         # a "stall" sample (buckle or slip). Untested; likely needs
         # tightening once a real feed rate is benched.
-        self.stall_mm = config.getfloat("stall_mm", 0.5, above=0.)
+        self.stall_mm = config.getfloat("stall_mm", 0.5, above=0.0)
         # PLACEHOLDER: consecutive stalled pulses (phase A) or
         # consecutive underextrusion_detected assist pulses (phase B)
         # before giving up. 1 was considered too hair-trigger for a
@@ -387,42 +388,39 @@ class BufferManager:
         # the extruder gear plus margin; assist_speed borrows
         # lll_buffer.py's cmd_DETECT_LOADED F300 as a starting point for
         # this different path, not because it was benched here.
-        self.assist_mm = config.getfloat("assist_mm", 30., above=0.)
-        self.assist_speed = config.getfloat("assist_speed", 300., above=0.)
+        self.assist_mm = config.getfloat("assist_mm", 30.0, above=0.0)
+        self.assist_speed = config.getfloat("assist_speed", 300.0, above=0.0)
         # PLACEHOLDER: how many assist G1 E<assist_mm> pulses phase B
         # will attempt before failing if the toolhead switch never
         # confirms a grab.
-        self.assist_max_pulses = config.getint("assist_max_pulses", 5,
-                                               minval=1)
+        self.assist_max_pulses = config.getint("assist_max_pulses", 5, minval=1)
         # PLACEHOLDER: fallback bound (ms) for backend.run() during phase
         # B when phase A produced no usable learned feed rate (e.g. the
         # lane started already touching the Roadrunner). When a learned
         # rate IS available, phase B derives its own run bound from it
         # instead - see _run_phase_b().
-        self.phase_b_run_ms = config.getint("phase_b_run_ms", 4000,
-                                            minval=100, maxval=60000)
+        self.phase_b_run_ms = config.getint(
+            "phase_b_run_ms", 4000, minval=100, maxval=60000
+        )
         # PLACEHOLDER: sub-budget (s) for the whole of phase B, separate
         # from (and bounded by) the overall load_timeout below.
-        self.phase_b_timeout = config.getfloat("phase_b_timeout", 30.,
-                                               above=0.)
+        self.phase_b_timeout = config.getfloat("phase_b_timeout", 30.0, above=0.0)
 
         # No-sensor fallback only: how long HALL2 must stay obstructed
         # before we call it arrived, and how long we wait for that to
         # happen before giving up.
-        self.load_settle_time = config.getfloat("load_settle_time", 1.5,
-                                                above=0.)
+        self.load_settle_time = config.getfloat("load_settle_time", 1.5, above=0.0)
         # Overall deadline for the whole load, either pipeline.
-        self.load_timeout = config.getfloat("load_timeout", 180., above=0.)
+        self.load_timeout = config.getfloat("load_timeout", 180.0, above=0.0)
         # Overall deadline for the whole unload, either pipeline (steps
         # 1-5 for the sensor pipeline, or the single bounded run() below
         # for the no-sensor fallback).
-        self.unload_timeout = config.getfloat("unload_timeout", 90., above=0.)
+        self.unload_timeout = config.getfloat("unload_timeout", 90.0, above=0.0)
         # No-sensor fallback only: bounded reverse run passed straight to
         # LLL_RUN. The firmware clamps its own back_timeout_ms on top of
         # this, so the host deadline only has to be the looser of the two
         # for the failure message to come from the right place.
-        self.unload_run_ms = config.getint("unload_run_ms", 0, minval=0,
-                                           maxval=60000)
+        self.unload_run_ms = config.getint("unload_run_ms", 0, minval=0, maxval=60000)
 
         # ------------------------------------------------------------
         # Unload sensor pipeline (T9). Reuses stall_mm/stall_count from
@@ -437,15 +435,15 @@ class BufferManager:
         # backend.run("back", pulse_ms) during the synchronized retract
         # (steps 2-3). Untested; wants tuning against unload_retract_speed
         # once benched.
-        self.unload_pulse_mm = config.getfloat("unload_pulse_mm", 2.0,
-                                               above=0.)
+        self.unload_pulse_mm = config.getfloat("unload_pulse_mm", 2.0, above=0.0)
         # PLACEHOLDER: G1 feedrate (mm/min) for the retract pulses above.
         # Borrowed as a starting point from the old fork's
         # variable_unload_speed (900,
         # buffer_manager_old/klippy_macros/buffer_manager.cfg:71) - not
         # benched on this hardware or against this pulse width.
         self.unload_retract_speed = config.getfloat(
-            "unload_retract_speed", 900., above=0.)
+            "unload_retract_speed", 900.0, above=0.0
+        )
         # PLACEHOLDER: target encoder-MEASURED mm of retract, accumulated
         # from real Roadrunner position deltas between the toolhead
         # switch clearing and filament_detected going false. Stands in
@@ -453,8 +451,7 @@ class BufferManager:
         # but unlike the old fork's gear_to_mdm_mm this is never driven
         # blind - falling short of it only logs a warning; see
         # _run_unload_clear(). Invented, not measured.
-        self.unload_clear_mm = config.getfloat("unload_clear_mm", 15.,
-                                               above=0.)
+        self.unload_clear_mm = config.getfloat("unload_clear_mm", 15.0, above=0.0)
         # PLACEHOLDER: bounded count of extra pulse_ms pulses run AFTER
         # filament_detected goes false, as margin past the extruder
         # entry. The Roadrunner cannot see this motion (nothing left
@@ -471,8 +468,7 @@ class BufferManager:
         # Swapping disks changes it: 3-segment = 2.90, 10-segment = 0.865.
         # Set to 0 to disable MDM measurement and fall back to bounded
         # blind pulses.
-        self.mdm_mm_per_count = config.getfloat("mdm_mm_per_count", 1.75,
-                                                minval=0.)
+        self.mdm_mm_per_count = config.getfloat("mdm_mm_per_count", 1.75, minval=0.0)
         # --- T10: MDM/Roadrunner differential monitoring ---------------
         # The MDM sits on the buffer arm, the Roadrunner near the toolhead;
         # they bracket the long reverse bowden. Filament advancing at one
@@ -490,48 +486,51 @@ class BufferManager:
         # stall. Much coarser than the Roadrunner's stall_count: one MDM
         # count is mdm_mm_per_count (1.75mm), so a single 100ms pulse at a
         # modest feed rate may legitimately produce none. PLACEHOLDER.
-        self.phase_a_stall_pulses = config.getint(
-            "phase_a_stall_pulses", 10, minval=1)
+        self.phase_a_stall_pulses = config.getint("phase_a_stall_pulses", 10, minval=1)
         self.differential_window_mm = config.getfloat(
-            "differential_window_mm", 17.5, above=0.)
+            "differential_window_mm", 17.5, above=0.0
+        )
         # Fraction of the window the two ends may disagree by before it is
         # reported. Deliberately generous: PLACEHOLDER, unvalidated, and
         # real buckling shows up as near-total divergence (MDM moving,
         # Roadrunner flat) rather than a subtle percentage.
         self.differential_tolerance = config.getfloat(
-            "differential_tolerance", 0.5, above=0.)
+            "differential_tolerance", 0.5, above=0.0
+        )
         # warn (default) or error. Defaults to warn because this heuristic
         # has never run on hardware and BOTH encoders are friction-coupled
         # - either can slip, and if they slip together this sees nothing.
         # A disagreement means "something is wrong somewhere", not proof
         # of which end failed. Switch to error once benched.
         self.differential_action = config.getchoice(
-            "differential_action", {"warn": "warn", "error": "error"},
-            "warn")
-        self.unload_clear_pulses = config.getint("unload_clear_pulses", 10,
-                                                  minval=0)
+            "differential_action", {"warn": "warn", "error": "error"}, "warn"
+        )
+        self.unload_clear_pulses = config.getint("unload_clear_pulses", 10, minval=0)
 
-        self.event_mask = config.getint("event_mask", DEFAULT_EVENT_MASK,
-                                        minval=0, maxval=0x7F)
+        self.event_mask = config.getint(
+            "event_mask", DEFAULT_EVENT_MASK, minval=0, maxval=0x7F
+        )
         if not self.event_mask & EV_ARM_BIT:
             raise config.error(
-                "buffer_manager %s: event_mask 0x%02X does not include the"
-                " arm bit (0x%02X) - arrival detection would never fire"
-                % (self.name, self.event_mask, EV_ARM_BIT))
+                f"buffer_manager {self.name}: event_mask"
+                f" 0x{self.event_mask:02X} does not include the arm bit"
+                f" (0x{EV_ARM_BIT:02X}) - arrival detection would never fire"
+            )
 
         gcode_macro = self.printer.load_object(config, "gcode_macro")
-        self.loaded_template = gcode_macro.load_template(
-            config, "loaded_gcode", "")
+        self.loaded_template = gcode_macro.load_template(config, "loaded_gcode", "")
         self.load_failed_template = gcode_macro.load_template(
-            config, "load_failed_gcode", "")
-        self.unloaded_template = gcode_macro.load_template(
-            config, "unloaded_gcode", "")
+            config, "load_failed_gcode", ""
+        )
+        self.unloaded_template = gcode_macro.load_template(config, "unloaded_gcode", "")
         self.unload_failed_template = gcode_macro.load_template(
-            config, "unload_failed_gcode", "")
+            config, "unload_failed_gcode", ""
+        )
         # Optional: there is no toolhead cutter on this hardware, so the
         # tip is shaped rather than cut. Empty by default (no-op).
         self.tip_forming_template = gcode_macro.load_template(
-            config, "tip_forming_gcode", "")
+            config, "tip_forming_gcode", ""
+        )
 
         self.arm = 0
         self.load_phase = PHASE_IDLE
@@ -544,6 +543,20 @@ class BufferManager:
         # _check_phase_abort()). "aborted" is the quiet-cancel sentinel
         # used by cmd_LOAD_ABORT; any other string is a failure reason.
         self._phase_abort_reason = None
+        # Bumped on every fresh LOAD_BEGIN and on LOAD_ABORT. A phase A/B
+        # greenlet captures its own value at the point it is SCHEDULED (not
+        # inside its own body - by the time the body runs, a newer call may
+        # have already bumped this again) and compares it at every loop
+        # check. This is a stronger guard than _phase_abort_reason alone:
+        # LOAD_BEGIN resets that sentinel to None at its own top, so an
+        # ABORT immediately followed by a fresh BEGIN can otherwise let the
+        # old greenlet wake up, find the sentinel already cleared and
+        # load_phase already PHASE_A_PUSH again (set by the new call), and
+        # keep running concurrently with the new one. The generation check
+        # catches that: a superseded greenlet sees its own value no longer
+        # matches and returns quietly (not a failure - being superseded is
+        # the intended outcome of a fresh LOAD_BEGIN).
+        self._load_generation = 0
         # Phase A learned feed rate accumulators (mm advanced / ms of
         # pulse that produced that advance), reset each load attempt.
         self._learned_feed_mm = 0.0
@@ -563,17 +576,20 @@ class BufferManager:
         # _phase_abort_reason/_check_phase_abort above). "aborted" is the
         # quiet-cancel sentinel used by cmd_UNLOAD_ABORT.
         self._unload_abort_reason = None
+        # Same idiom as _load_generation above, for the TIP_FORM/RETRACT/
+        # CLEAR greenlet chain.
+        self._unload_generation = 0
         self._unload_stall_streak = 0
         # Encoder-measured (Roadrunner position delta) mm retracted since
         # the toolhead switch cleared, accumulated by _run_unload_retract
         # and consumed by _run_unload_clear - see the T9 module docstring.
         self._unload_since_switch_mm = 0.0
         self._unload_clear_accum_mm = 0.0
-        self._diff_rr_mm = 0.0        # Roadrunner mm this window
-        self._diff_mdm_base = None    # MDM counter at window start
-        self._diff_disabled = False   # latched off after a failure
+        self._diff_rr_mm = 0.0  # Roadrunner mm this window
+        self._diff_mdm_base = None  # MDM counter at window start
+        self._diff_disabled = False  # latched off after a failure
         self._mdm_last_counter = None  # phase A per-pulse baseline
-        self._diff_last_rr = 0.0       # phase B Roadrunner baseline
+        self._diff_last_rr = 0.0  # phase B Roadrunner baseline
         self._phaseA_nomdm_warned = False
 
         self.load_timer = self.reactor.register_timer(self._load_timer)
@@ -590,65 +606,83 @@ class BufferManager:
             # idiom is kept for consistency (and in case a second switch
             # is ever added on this lane).
             buttons = self.printer.load_object(config, "buttons")
-            buttons.register_buttons([post_extruder_pin],
-                                     self._toolhead_switch_event)
+            buttons.register_buttons([post_extruder_pin], self._toolhead_switch_event)
 
         self.printer.register_event_handler("klippy:connect", self._connect)
         self.printer.register_event_handler("klippy:ready", self._ready)
 
         self.gcode.register_mux_command(
-            "BUFFER_LOAD_BEGIN", "LANE", self.lane_name, self.cmd_LOAD_BEGIN,
+            "BUFFER_LOAD_BEGIN",
+            "LANE",
+            self.lane_name,
+            self.cmd_LOAD_BEGIN,
             desc="Arm the arrival watcher; runs loaded_gcode once filament "
-                 "reaches the extruder")
+            "reaches the extruder",
+        )
         self.gcode.register_mux_command(
-            "BUFFER_LOAD_ABORT", "LANE", self.lane_name, self.cmd_LOAD_ABORT,
-            desc="Cancel an armed arrival watcher without running any macro")
+            "BUFFER_LOAD_ABORT",
+            "LANE",
+            self.lane_name,
+            self.cmd_LOAD_ABORT,
+            desc="Cancel an armed arrival watcher without running any macro",
+        )
         self.gcode.register_mux_command(
-            "BUFFER_UNLOAD", "LANE", self.lane_name, self.cmd_UNLOAD,
-            desc="Run the lane back until the entrance sensor clears")
+            "BUFFER_UNLOAD",
+            "LANE",
+            self.lane_name,
+            self.cmd_UNLOAD,
+            desc="Run the lane back until the entrance sensor clears",
+        )
         self.gcode.register_mux_command(
-            "BUFFER_UNLOAD_ABORT", "LANE", self.lane_name,
+            "BUFFER_UNLOAD_ABORT",
+            "LANE",
+            self.lane_name,
             self.cmd_UNLOAD_ABORT,
-            desc="Stop an in-flight unload without running any macro")
+            desc="Stop an in-flight unload without running any macro",
+        )
         # Bridge target for lll_buffer's event_gcode hook.
         self.gcode.register_mux_command(
-            "BUFFER_LOAD_EVENT", "LANE", self.lane_name, self.cmd_LOAD_EVENT,
-            desc="Internal: feed an lll_buffer firmware event to"
-                 " buffer_manager")
+            "BUFFER_LOAD_EVENT",
+            "LANE",
+            self.lane_name,
+            self.cmd_LOAD_EVENT,
+            desc="Internal: feed an lll_buffer firmware event to buffer_manager",
+        )
 
     def _connect(self):
         # The one place this module looks up an lll_buffer object by name.
         # It is wrapped in a backend immediately and never touched again
         # from outside LllBufferBackend.
-        lane_obj = self.printer.lookup_object(
-            "lll_buffer " + self.lane_name, None)
+        lane_obj = self.printer.lookup_object("lll_buffer " + self.lane_name, None)
         if lane_obj is None:
             raise self.printer.config_error(
-                "buffer_manager %s: no [lll_buffer %s] section found"
-                % (self.name, self.lane_name))
+                f"buffer_manager {self.name}: no [lll_buffer {self.lane_name}]"
+                " section found"
+            )
         self.backend = LllBufferBackend(lane_obj, self.gcode, self.lane_name)
         if not self.backend.has_event_gcode():
             raise self.printer.config_error(
-                "buffer_manager %s: [lll_buffer %s] has no event_gcode - add"
+                f"buffer_manager {self.name}: [lll_buffer {self.lane_name}]"
+                " has no event_gcode - add"
                 "\n    event_gcode:\n"
-                "        BUFFER_LOAD_EVENT LANE=%s NAME={event.name}"
+                f"        BUFFER_LOAD_EVENT LANE={self.lane_name} NAME={{event.name}}"
                 " VALUE={event.value}"
-                % (self.name, self.lane_name, self.lane_name))
+            )
         if self.use_sensor_pipeline:
             self.roadrunner = self.printer.lookup_object(
-                "high_resolution_filament_sensor " + self.roadrunner_name,
-                None)
+                "high_resolution_filament_sensor " + self.roadrunner_name, None
+            )
             if self.roadrunner is None:
                 raise self.printer.config_error(
-                    "buffer_manager %s: no [high_resolution_filament_sensor"
-                    " %s] section found"
-                    % (self.name, self.roadrunner_name))
-            self.extruder = self.printer.lookup_object(
-                self.extruder_name, None)
+                    f"buffer_manager {self.name}: no [high_resolution_filament_sensor"
+                    f" {self.roadrunner_name}] section found"
+                )
+            self.extruder = self.printer.lookup_object(self.extruder_name, None)
             if self.extruder is None:
                 raise self.printer.config_error(
-                    "buffer_manager %s: extruder object '%s' not found"
-                    % (self.name, self.extruder_name))
+                    f"buffer_manager {self.name}: extruder object"
+                    f" '{self.extruder_name}' not found"
+                )
 
     def _ready(self):
         # Raise the firmware telemetry mask so EV_ARM is actually emitted.
@@ -656,18 +690,23 @@ class BufferManager:
         # must not depend on [save_variables] being present, and it must not
         # quietly become part of the user's persisted tweak set.
         try:
+            assert self.backend is not None
             p = self.backend.set_event_mask(self.event_mask)
             if not p.get("ok", 1):
-                logging.warning("buffer_manager %s: firmware refused"
-                                " event_mask 0x%02X", self.name,
-                                self.event_mask)
+                logger.warning(
+                    "buffer_manager %s: firmware refused event_mask 0x%02X",
+                    self.name,
+                    self.event_mask,
+                )
             elif p.get("val") != self.event_mask:
-                logging.warning("buffer_manager %s: event_mask applied as"
-                                " 0x%02X, asked 0x%02X", self.name,
-                                p.get("val"), self.event_mask)
+                logger.warning(
+                    "buffer_manager %s: event_mask applied as 0x%02X, asked 0x%02X",
+                    self.name,
+                    p.get("val"),
+                    self.event_mask,
+                )
         except Exception:
-            logging.exception("buffer_manager %s: could not set event_mask",
-                              self.name)
+            logger.exception("buffer_manager %s: could not set event_mask", self.name)
 
     # ------------------------------------------------------------------
     # Event bridge
@@ -686,10 +725,10 @@ class BufferManager:
         # The firmware latched an error, so the motor is stopped. Fail now
         # instead of waiting out the deadline for an arrival that cannot
         # come.
-        reason = "buffer error latched (ecode=%d)" % (ecode,)
-        if self.load_phase in (PHASE_WAIT_FEED, PHASE_FEEDING):
+        reason = f"buffer error latched (ecode={ecode})"
+        if self.load_phase in LOAD_FALLBACK_PHASES:
             self._fail_load(reason)
-        elif self.load_phase in (PHASE_A_PUSH, PHASE_B_ASSIST):
+        elif self.load_phase in LOAD_SENSOR_PHASES:
             # The phase A/B loop runs in its own reactor callback greenlet
             # (never a timer - see the module docstring), and polls this
             # flag itself between pulses rather than being interrupted
@@ -736,8 +775,9 @@ class BufferManager:
         self.reactor.update_timer(self.load_timer, waketime)
 
     def _next_load_waketime(self):
-        candidates = [d for d in (self.settle_deadline, self.load_deadline)
-                      if d is not None]
+        candidates = [
+            d for d in (self.settle_deadline, self.load_deadline) if d is not None
+        ]
         return min(candidates) if candidates else self.reactor.NEVER
 
     def _load_timer(self, eventtime):
@@ -761,8 +801,7 @@ class BufferManager:
                 self.reactor.register_callback(self._run_loaded_gcode)
                 return self.reactor.NEVER
         if self.load_deadline is not None and eventtime >= self.load_deadline:
-            self._fail_load("timed out waiting for filament to reach the"
-                            " extruder")
+            self._fail_load("timed out waiting for filament to reach the extruder")
             return self.reactor.NEVER
         return self._next_load_waketime()
 
@@ -789,11 +828,23 @@ class BufferManager:
     # ------------------------------------------------------------------
     # Load arrival detection - sensor pipeline (phase A / B / C)
     # ------------------------------------------------------------------
-    def _check_phase_abort(self):
-        """Consume a pending abort/failure request, if any. Returns True
-        if the calling phase loop must stop now. Called between every
-        pulse so a firmware error event or BUFFER_LOAD_ABORT interrupts
-        promptly without needing to touch the loop from outside it."""
+    def _check_phase_abort(self, generation):
+        """Consume a pending abort/failure request, if any, and check that
+        the calling greenlet is still the current one. Returns True if the
+        calling phase loop must stop now. Called between every pulse so a
+        firmware error event, BUFFER_LOAD_ABORT, or a newer LOAD_BEGIN
+        interrupts promptly without needing to touch the loop from outside
+        it.
+
+        The generation check catches a case _phase_abort_reason alone
+        cannot: cmd_LOAD_BEGIN resets that sentinel to None at its own top,
+        so an ABORT immediately followed by a fresh BEGIN (before this
+        greenlet's next wakeup) can leave the sentinel already cleared by
+        the time this runs. Comparing generation stops the (now superseded)
+        old greenlet regardless - see the _load_generation comment in
+        __init__."""
+        if generation != self._load_generation:
+            return True
         reason = self._phase_abort_reason
         if reason is None:
             return False
@@ -808,9 +859,9 @@ class BufferManager:
         try:
             return self.roadrunner.get_status(self.reactor.monotonic())
         except Exception:
-            logging.exception(
-                "buffer_manager %s: roadrunner status read failed",
-                self.name)
+            logger.exception(
+                "buffer_manager %s: roadrunner status read failed", self.name
+            )
             return {}
 
     def _extruder_can_extrude(self):
@@ -820,44 +871,52 @@ class BufferManager:
         if self.extruder is None:
             return False
         try:
-            return bool(self.extruder.get_status(
-                self.reactor.monotonic()).get("can_extrude", False))
+            return bool(
+                self.extruder.get_status(self.reactor.monotonic()).get(
+                    "can_extrude", False
+                )
+            )
         except Exception:
-            logging.exception(
-                "buffer_manager %s: extruder status read failed", self.name)
+            logger.exception(
+                "buffer_manager %s: extruder status read failed", self.name
+            )
             return False
 
     def _toolhead_switch_event(self, eventtime, state):
         self._toolhead_switch_state = bool(state & 1)
 
-    def _run_phase_a(self, eventtime):
+    def _run_phase_a(self, eventtime, generation):
         # Phase A - PUSH: buffer alone, cold-safe. Pulsed jog() on a
         # pulse_ms tick until the Roadrunner reports filament_detected.
         # Runs entirely in this callback greenlet (never a timer), so
         # reactor.pause() between pulses is safe - see module docstring.
-        if self.load_phase != PHASE_A_PUSH:
-            return  # aborted/failed before this greenlet even started
+        #
+        # generation was captured by the caller at the moment this greenlet
+        # was scheduled (see cmd_LOAD_BEGIN) - see _load_generation in
+        # __init__ for why that matters.
+        if generation != self._load_generation or self.load_phase != PHASE_A_PUSH:
+            return  # superseded, or aborted/failed before this greenlet
+            # even started
         while True:
-            if self._check_phase_abort():
+            if self._check_phase_abort(generation):
                 return
             if self.reactor.monotonic() >= self.load_deadline:
                 self._fail_load(
                     "phase A (push) timed out before filament reached the"
-                    " Roadrunner sensor")
+                    " Roadrunner sensor"
+                )
                 return
             status = self._roadrunner_status()
             if status.get("filament_detected"):
                 break
-            pos_before = status.get("position", 0.0)
             try:
+                assert self.backend is not None
                 self.backend.jog("fwd", self.pulse_ms)
             except Exception:
-                logging.exception(
-                    "buffer_manager %s: phase A jog failed", self.name)
+                logger.exception("buffer_manager %s: phase A jog failed", self.name)
                 self._fail_load("jog command failed during phase A")
                 return
-            self.reactor.pause(
-                self.reactor.monotonic() + self.pulse_ms / 1000.)
+            self.reactor.pause(self.reactor.monotonic() + self.pulse_ms / 1000.0)
             # PHASE A MEASURES WITH THE MDM, NOT THE ROADRUNNER.
             # This loop runs *until* filament reaches the Roadrunner, so
             # for its entire duration nothing threads that encoder wheel
@@ -875,10 +934,12 @@ class BufferManager:
                 # the only backstop. Said once, not once per pulse.
                 if not self._phaseA_nomdm_warned:
                     self._phaseA_nomdm_warned = True
-                    logging.warning(
+                    logger.warning(
                         "buffer_manager %s: no MDM counter - phase A has"
                         " no way to detect a stall and will rely on"
-                        " load_timeout alone", self.name)
+                        " load_timeout alone",
+                        self.name,
+                    )
             elif counts > 0:
                 # Learned feed rate also comes from the MDM here, for the
                 # same reason. counts * mm_per_count, not Roadrunner mm.
@@ -894,54 +955,63 @@ class BufferManager:
                 # therefore much coarser than the Roadrunner's stall_count.
                 self._phaseA_stall_streak += 1
                 if self._phaseA_stall_streak >= self.phase_a_stall_pulses:
+                    expected_mm = (self._phaseA_stall_streak
+                                  * self.mdm_mm_per_count)
                     self._fail_load(
-                        "phase A stalled: %d consecutive pulses produced"
-                        " no MDM movement at all (>= %.1fmm of travel"
-                        " expected) - filament is not advancing at the"
-                        " buffer end. Buckling, slip, or an empty lane"
-                        % (self._phaseA_stall_streak,
-                           self._phaseA_stall_streak
-                           * self.mdm_mm_per_count))
+                        f"phase A stalled: {self._phaseA_stall_streak}"
+                        " consecutive pulses produced no MDM movement at all"
+                        f" (>= {expected_mm:.1f}mm of travel expected) -"
+                        " filament is not advancing at the buffer end."
+                        " Buckling, slip, or an empty lane"
+                    )
                     return
         # Phase A complete - filament seen at the Roadrunner. Make the
         # A/B boundary explicit even though pulses are self-terminating.
         self._stop_lane()
-        self.reactor.register_callback(self._run_phase_b)
+        self.reactor.register_callback(
+            lambda et, g=generation: self._run_phase_b(et, g)
+        )
 
-    def _run_phase_b(self, eventtime):
+    def _run_phase_b(self, eventtime, generation):
         # Phase B - ASSIST: needs the extruder above min_extrude_temp.
         # Fail cleanly right at the A->B boundary if it is cold, rather
         # than mid-move - Klipper would refuse the E-move anyway, but
         # only after the buffer side has already started running.
-        if self.load_phase != PHASE_A_PUSH:
-            return  # aborted/failed already
+        if generation != self._load_generation or self.load_phase != PHASE_A_PUSH:
+            return  # superseded, or aborted/failed already
         if not self._extruder_can_extrude():
             self._fail_load(
                 "phase A complete but the extruder is below"
                 " min_extrude_temp - heat it (e.g. M109) before phase B"
-                " (assist) can run")
+                " (assist) can run"
+            )
             return
         self.load_phase = PHASE_B_ASSIST
         self._toolhead_switch_state = False
         self._phaseB_slip_streak = 0
-        deadline_b = min(self.load_deadline,
-                         self.reactor.monotonic() + self.phase_b_timeout)
+        # Keep the phase-B budget bounded by the overall load deadline when
+        # one is available.  The explicit None check also makes the
+        # optional deadline safe for static type checking.
+        deadline_b = self.reactor.monotonic() + self.phase_b_timeout
+        if self.load_deadline is not None:
+            deadline_b = min(self.load_deadline, deadline_b)
 
         # Bound backend.run() using the feed rate phase A just learned,
         # rather than a blind placeholder, when a sample is available.
         # x2 is an invented safety margin (assist load is not push-alone,
         # so the true rate may differ) - not benched.
         if self._learned_feed_ms > 0:
-            rate_mm_per_ms = self._learned_feed_mm / float(
-                self._learned_feed_ms)
-            run_ms = int(self.assist_mm / rate_mm_per_ms * 2) \
-                if rate_mm_per_ms > 0 else self.phase_b_run_ms
+            rate_mm_per_ms = self._learned_feed_mm / float(self._learned_feed_ms)
+            run_ms = (
+                int(self.assist_mm / rate_mm_per_ms * 2)
+                if rate_mm_per_ms > 0
+                else self.phase_b_run_ms
+            )
             run_ms = max(self.pulse_ms, min(run_ms, 60000))
         else:
             run_ms = self.phase_b_run_ms
 
         gcode_move = self.printer.lookup_object("gcode_move")
-        assist_speed_int = int(round(self.assist_speed))
 
         attempts = 0
         # Baseline for the differential window. Filament has just reached
@@ -950,19 +1020,20 @@ class BufferManager:
         self._diff_last_rr = self._roadrunner_status().get("position", 0.0)
         self._diff_reset()
         while True:
-            if self._check_phase_abort():
+            if self._check_phase_abort(generation):
                 return
             if self.reactor.monotonic() >= deadline_b:
                 self._fail_load(
                     "phase B (assist) timed out waiting for the toolhead"
-                    " switch to confirm pickup")
+                    " switch to confirm pickup"
+                )
                 return
             attempts += 1
             try:
+                assert self.backend is not None
                 self.backend.run("fwd", run_ms)
             except Exception:
-                logging.exception(
-                    "buffer_manager %s: phase B run failed", self.name)
+                logger.exception("buffer_manager %s: phase B run failed", self.name)
                 self._fail_load("run command failed during phase B")
                 return
             # The extruder must not fight the whole path alone - the
@@ -970,20 +1041,14 @@ class BufferManager:
             # (autonomous on the firmware side) while this blocks on the
             # extrude move, which is the "concurrent" half of phase B.
             try:
-                was_abs = gcode_move.get_status(
-                    self.reactor.monotonic())["absolute_extrude"]
-                script = "M83\nG1 E%.2f F%d\nM400" % (
-                    self.assist_mm, assist_speed_int)
-                if was_abs:
-                    script += "\nM82"
-                self.gcode.run_script(script)
+                self._extrude(gcode_move, self.assist_mm, self.assist_speed)
             except Exception:
-                logging.exception(
-                    "buffer_manager %s: phase B assist move failed",
-                    self.name)
+                logger.exception(
+                    "buffer_manager %s: phase B assist move failed", self.name
+                )
                 self._fail_load("assist extrude move failed during phase B")
                 return
-            if self._check_phase_abort():
+            if self._check_phase_abort(generation):
                 return
             status = self._roadrunner_status()
             # T10 differential lives HERE, not in phase A. By this point
@@ -992,8 +1057,9 @@ class BufferManager:
             # strand and a disagreement between them means something. In
             # phase A the Roadrunner has no filament in it at all, so the
             # comparison there would be against a constant zero.
-            rr_delta = abs(status.get("position", self._diff_last_rr)
-                           - self._diff_last_rr)
+            rr_delta = abs(
+                status.get("position", self._diff_last_rr) - self._diff_last_rr
+            )
             self._diff_last_rr = status.get("position", self._diff_last_rr)
             if self._diff_check(rr_delta, self._fail_load):
                 return
@@ -1001,9 +1067,10 @@ class BufferManager:
                 self._phaseB_slip_streak += 1
                 if self._phaseB_slip_streak >= self.stall_count:
                     self._fail_load(
-                        "phase B underextrusion persisted for %d assist"
-                        " pulses (slip suspected)"
-                        % (self._phaseB_slip_streak,))
+                        "phase B underextrusion persisted for"
+                        f" {self._phaseB_slip_streak} assist pulses"
+                        " (slip suspected)"
+                    )
                     return
             else:
                 self._phaseB_slip_streak = 0
@@ -1012,7 +1079,8 @@ class BufferManager:
             if attempts >= self.assist_max_pulses:
                 self._fail_load(
                     "phase B: toolhead switch did not confirm pickup after"
-                    " %d assist pulses" % (attempts,))
+                    f" {attempts} assist pulses"
+                )
                 return
         # Phase C - HANDOFF.
         self._stop_lane()
@@ -1044,10 +1112,8 @@ class BufferManager:
         # this timer - same split as _load_timer vs phase A/B above.
         if self.unload_phase != UNLOAD_RUNNING:
             return self.reactor.NEVER
-        if self.unload_deadline is not None \
-                and eventtime >= self.unload_deadline:
-            self._fail_unload("timed out waiting for the entrance sensor to"
-                              " clear")
+        if self.unload_deadline is not None and eventtime >= self.unload_deadline:
+            self._fail_unload("timed out waiting for the entrance sensor to clear")
             return self.reactor.NEVER
         return self.unload_deadline or self.reactor.NEVER
 
@@ -1059,12 +1125,14 @@ class BufferManager:
         self.reactor.update_timer(self.unload_timer, self.reactor.NEVER)
         self.reactor.register_callback(self._stop_then_unload_failed)
 
-    def _check_unload_abort(self):
+    def _check_unload_abort(self, generation):
         """Consume a pending abort/failure request for the sensor-pipeline
-        unload, if any. Returns True if the calling phase loop must stop
-        now. Mirrors _check_phase_abort() above - called between every
-        pulse so a firmware error event or BUFFER_UNLOAD_ABORT interrupts
-        promptly without needing to touch the loop from outside it."""
+        unload, if any, and check that the calling greenlet is still the
+        current one. Returns True if the calling phase loop must stop now.
+        Mirrors _check_phase_abort() above, including the generation check -
+        see _unload_generation/_load_generation in __init__."""
+        if generation != self._unload_generation:
+            return True
         reason = self._unload_abort_reason
         if reason is None:
             return False
@@ -1076,7 +1144,7 @@ class BufferManager:
     # ------------------------------------------------------------------
     # Unload - sensor pipeline (T9): TIP_FORM -> RETRACT -> CLEAR -> DONE
     # ------------------------------------------------------------------
-    def _run_unload_tip_form(self, eventtime):
+    def _run_unload_tip_form(self, eventtime, generation):
         # Step 1 (optional): no toolhead cutter exists on this hardware,
         # so the tip is shaped rather than cut. Empty template by default
         # - a no-op in that case. Best-effort like the other gcode hooks
@@ -1084,15 +1152,24 @@ class BufferManager:
         # template rather than aborting the unload over cosmetic tip
         # shaping); a real failure further down (stall, timeout, firmware
         # error) still aborts normally.
-        if self.unload_phase != UNLOAD_TIP_FORM:
+        #
+        # generation was captured by the caller at the moment this greenlet
+        # was scheduled (see cmd_UNLOAD) - see _unload_generation in
+        # __init__ for why that matters.
+        if (
+            generation != self._unload_generation
+            or self.unload_phase != UNLOAD_TIP_FORM
+        ):
             return
         self._exec_template(self.tip_forming_template, "tip_forming_gcode")
-        if self._check_unload_abort():
+        if self._check_unload_abort(generation):
             return
         self.unload_phase = UNLOAD_RETRACT
-        self.reactor.register_callback(self._run_unload_retract)
+        self.reactor.register_callback(
+            lambda et, g=generation: self._run_unload_retract(et, g)
+        )
 
-    def _run_unload_retract(self, eventtime):
+    def _run_unload_retract(self, eventtime, generation):
         # Steps 2-3: synchronized retract. G1 E-<unload_pulse_mm> issued
         # concurrent with backend.run("back", pulse_ms) on every tick -
         # upstream's finding (docs/PORT_RUNBOOK.md T9, same root cause as
@@ -1111,18 +1188,19 @@ class BufferManager:
         # to the hotend than the Roadrunner - see §0's filament path), but
         # this loop tolerates either already being true at entry (e.g. a
         # retried unload) rather than assuming a fresh transition.
-        if self.unload_phase != UNLOAD_RETRACT:
-            return  # aborted/failed before this greenlet even started
+        if generation != self._unload_generation or self.unload_phase != UNLOAD_RETRACT:
+            return  # superseded, or aborted/failed before this greenlet
+            # even started
         # Klipper blocks E-moves (both directions) below min_extrude_temp,
         # same as phase B on load - fail cleanly here rather than mid-move.
         if not self._extruder_can_extrude():
             self._fail_unload(
                 "cannot retract - the extruder is below min_extrude_temp,"
                 " heat it (e.g. M109) before BUFFER_UNLOAD can run the"
-                " synchronized retract")
+                " synchronized retract"
+            )
             return
         gcode_move = self.printer.lookup_object("gcode_move")
-        speed_int = int(round(self.unload_retract_speed))
         switch_cleared = not self._toolhead_switch_state
         sensor_cleared = False
         self._unload_since_switch_mm = 0.0
@@ -1130,43 +1208,41 @@ class BufferManager:
         # _diff_check(); start a fresh comparison window here.
         self._diff_reset()
         while True:
-            if self._check_unload_abort():
+            if self._check_unload_abort(generation):
                 return
             if self.reactor.monotonic() >= self.unload_deadline:
                 self._fail_unload(
-                    "synchronized retract timed out (switch_cleared=%s"
-                    " sensor_cleared=%s)" % (switch_cleared, sensor_cleared))
+                    f"synchronized retract timed out (switch_cleared={switch_cleared}"
+                    f" sensor_cleared={sensor_cleared})"
+                )
                 return
             pos_before = self._roadrunner_status().get("position", 0.0)
             try:
+                assert self.backend is not None
                 self.backend.run("back", self.pulse_ms)
             except Exception:
-                logging.exception(
-                    "buffer_manager %s: unload retract run() failed",
-                    self.name)
-                self._fail_unload("backend run() failed during synchronized"
-                                  " retract")
+                logger.exception(
+                    "buffer_manager %s: unload retract run() failed", self.name
+                )
+                self._fail_unload("backend run() failed during synchronized retract")
                 return
             # The buffer run() above is already dispatched and bounded
             # (autonomous on the firmware side) while this blocks on the
             # retract move - the "concurrent" half of the synchronized
             # retract, same shape as phase B's assist move.
             try:
-                was_abs = gcode_move.get_status(
-                    self.reactor.monotonic())["absolute_extrude"]
-                script = "M83\nG1 E-%.2f F%d\nM400" % (
-                    self.unload_pulse_mm, speed_int)
-                if was_abs:
-                    script += "\nM82"
-                self.gcode.run_script(script)
+                self._extrude(
+                    gcode_move, -self.unload_pulse_mm, self.unload_retract_speed
+                )
             except Exception:
-                logging.exception(
-                    "buffer_manager %s: unload retract extrude move"
-                    " failed", self.name)
-                self._fail_unload("retract extrude move failed during"
-                                  " synchronized retract")
+                logger.exception(
+                    "buffer_manager %s: unload retract extrude move failed", self.name
+                )
+                self._fail_unload(
+                    "retract extrude move failed during synchronized retract"
+                )
                 return
-            if self._check_unload_abort():
+            if self._check_unload_abort(generation):
                 return
             status = self._roadrunner_status()
             # abs(): the Roadrunner's position sign convention depends on
@@ -1191,12 +1267,13 @@ class BufferManager:
                 self._unload_stall_streak += 1
                 if self._unload_stall_streak >= self.stall_count:
                     self._fail_unload(
-                        "synchronized retract stalled: %d consecutive"
-                        " pulses moved <%.2fmm (upstream's finding is that"
+                        f"synchronized retract stalled: {self._unload_stall_streak}"
+                        " consecutive pulses moved <"
+                        f"{self.stall_mm:.2f}mm (upstream's finding is that"
                         " the extruder pulling alone against the whole"
                         " path slips - the buffer run() above should be"
                         " preventing that)"
-                        % (self._unload_stall_streak, self.stall_mm))
+                    )
                     return
             if not switch_cleared and not self._toolhead_switch_state:
                 switch_cleared = True
@@ -1206,9 +1283,11 @@ class BufferManager:
                 break
         self._unload_clear_accum_mm = self._unload_since_switch_mm
         self.unload_phase = UNLOAD_CLEAR
-        self.reactor.register_callback(self._run_unload_clear)
+        self.reactor.register_callback(
+            lambda et, g=generation: self._run_unload_clear(et, g)
+        )
 
-    def _run_unload_clear(self, eventtime):
+    def _run_unload_clear(self, eventtime, generation):
         # Step 4: retract further past the extruder entry. By this point
         # the Roadrunner has already reported filament_detected=False -
         # meaning nothing is left threading its encoder wheel. The
@@ -1236,91 +1315,101 @@ class BufferManager:
         # discrete signals from the retract phase (switch clear + sensor
         # clear) remain the authoritative completion signal - this phase
         # is best-effort confirmation on top of them, not a hard gate.
-        if self.unload_phase != UNLOAD_CLEAR:
+        if generation != self._unload_generation or self.unload_phase != UNLOAD_CLEAR:
             return
         if self._unload_clear_accum_mm < self.unload_clear_mm:
-            logging.warning(
+            logger.warning(
                 "buffer_manager %s: unload - only %.2fmm of"
                 " encoder-measured retract between the toolhead switch"
                 " clearing and the Roadrunner losing filament, short of"
                 " the %.2fmm unload_clear_mm margin. Continuing with the"
                 " bounded extra-pulse margin anyway - see the"
                 " unload_clear_mm config comment.",
-                self.name, self._unload_clear_accum_mm, self.unload_clear_mm)
+                self.name,
+                self._unload_clear_accum_mm,
+                self.unload_clear_mm,
+            )
         gcode_move = self.printer.lookup_object("gcode_move")
-        speed_int = int(round(self.unload_retract_speed))
         # The Roadrunner is blind from here on - the tip is upstream of it.
         # But the tip sits between the Roadrunner and the BUFFER, so the MDM
         # still has filament through it and can still measure this retract.
         # That is what the two-sensor bracket buys: whichever end the tip has
         # not yet passed is the end that can still see it. Fall back to
         # bounded blind pulses only if the MDM is unavailable or disabled.
-        mdm_target_mm = max(0., self.unload_clear_mm
-                            - self._unload_clear_accum_mm)
+        mdm_target_mm = max(0.0, self.unload_clear_mm - self._unload_clear_accum_mm)
         mdm_base = None
-        if self.mdm_mm_per_count > 0.:
+        if self.mdm_mm_per_count > 0.0:
             try:
-                present, counter = self.backend.mdm()
+                assert self.backend is not None
+                _present, counter = self.backend.mdm()
                 if counter is not None:
                     mdm_base = counter
             except Exception:
-                logging.exception("buffer_manager %s: MDM read failed,"
-                                  " falling back to bounded pulses",
-                                  self.name)
+                logger.exception(
+                    "buffer_manager %s: MDM read failed,"
+                    " falling back to bounded pulses",
+                    self.name,
+                )
         if mdm_base is None:
-            logging.info("buffer_manager %s: unload - no MDM measurement"
-                         " available, using %d bounded blind pulses",
-                         self.name, self.unload_clear_pulses)
-        mdm_moved_mm = 0.
+            logger.info(
+                "buffer_manager %s: unload - no MDM measurement"
+                " available, using %d bounded blind pulses",
+                self.name,
+                self.unload_clear_pulses,
+            )
+        mdm_moved_mm = 0.0
         pulses = 0
         while pulses < self.unload_clear_pulses:
-            if self._check_unload_abort():
+            if self._check_unload_abort(generation):
                 return
             if self.reactor.monotonic() >= self.unload_deadline:
-                self._fail_unload("timed out during the final post-sensor"
-                                  " retract margin (step 4)")
+                self._fail_unload(
+                    "timed out during the final post-sensor retract margin (step 4)"
+                )
                 return
             pulses += 1
             try:
+                assert self.backend is not None
                 self.backend.run("back", self.pulse_ms)
             except Exception:
-                logging.exception(
-                    "buffer_manager %s: unload clear run() failed",
-                    self.name)
-                self._fail_unload("backend run() failed during the final"
-                                  " retract margin")
+                logger.exception(
+                    "buffer_manager %s: unload clear run() failed", self.name
+                )
+                self._fail_unload(
+                    "backend run() failed during the final retract margin"
+                )
                 return
             try:
-                was_abs = gcode_move.get_status(
-                    self.reactor.monotonic())["absolute_extrude"]
-                script = "M83\nG1 E-%.2f F%d\nM400" % (
-                    self.unload_pulse_mm, speed_int)
-                if was_abs:
-                    script += "\nM82"
-                self.gcode.run_script(script)
+                self._extrude(
+                    gcode_move, -self.unload_pulse_mm, self.unload_retract_speed
+                )
             except Exception:
-                logging.exception(
-                    "buffer_manager %s: unload clear extrude move failed",
-                    self.name)
-                self._fail_unload("retract extrude move failed during the"
-                                  " final retract margin")
+                logger.exception(
+                    "buffer_manager %s: unload clear extrude move failed", self.name
+                )
+                self._fail_unload(
+                    "retract extrude move failed during the final retract margin"
+                )
                 return
-            if self._check_unload_abort():
+            if self._check_unload_abort(generation):
                 return
             if mdm_base is not None:
                 try:
                     _present, counter = self.backend.mdm()
-                except Exception:
+                except Exception:  # noqa: BLE001
                     counter = None
                 if counter is not None:
                     # uint32 counter: wrap-safe unsigned delta.
                     delta = (counter - mdm_base) & 0xFFFFFFFF
                     mdm_moved_mm = delta * self.mdm_mm_per_count
                     if mdm_moved_mm >= mdm_target_mm:
-                        logging.info(
+                        logger.info(
                             "buffer_manager %s: unload - MDM confirmed"
                             " %.2fmm of final retract in %d pulses",
-                            self.name, mdm_moved_mm, pulses)
+                            self.name,
+                            mdm_moved_mm,
+                            pulses,
+                        )
                         break
         else:
             if mdm_base is not None and mdm_moved_mm < mdm_target_mm:
@@ -1328,13 +1417,16 @@ class BufferManager:
                 # fatal: the switch-clear and sensor-clear signals already
                 # said the strand is out. Both encoders are friction
                 # coupled and can slip, so this is a heuristic, not proof.
-                logging.warning(
+                logger.warning(
                     "buffer_manager %s: unload - MDM measured only %.2fmm"
                     " of the %.2fmm final retract margin within %d pulses;"
                     " the strand is out per the switch and sensor, but the"
                     " tip may be parked shorter than intended",
-                    self.name, mdm_moved_mm, mdm_target_mm,
-                    self.unload_clear_pulses)
+                    self.name,
+                    mdm_moved_mm,
+                    mdm_target_mm,
+                    self.unload_clear_pulses,
+                )
         # Step 5 - stop() then unloaded_gcode.
         self.unload_phase = UNLOAD_DONE
         self.unload_deadline = None
@@ -1346,8 +1438,7 @@ class BufferManager:
 
     def _stop_then_unload_failed(self, eventtime):
         self._stop_lane()
-        self._exec_template(self.unload_failed_template,
-                            "unload_failed_gcode")
+        self._exec_template(self.unload_failed_template, "unload_failed_gcode")
 
     # ------------------------------------------------------------------
     # T10 - MDM/Roadrunner differential monitoring
@@ -1356,13 +1447,13 @@ class BufferManager:
         """Counts the MDM has advanced since the last call, or None if the
         MDM is unavailable. Wrap-safe. Used by phase A, where the
         Roadrunner is blind because filament has not reached it yet."""
-        if self.mdm_mm_per_count <= 0.:
+        if self.mdm_mm_per_count <= 0.0:
             return None
         try:
+            assert self.backend is not None
             _present, counter = self.backend.mdm()
         except Exception:
-            logging.exception("buffer_manager %s: MDM read failed",
-                              self.name)
+            logger.exception("buffer_manager %s: MDM read failed", self.name)
             return None
         if counter is None:
             return None
@@ -1381,9 +1472,7 @@ class BufferManager:
     def _diff_available(self):
         if self._diff_disabled or not self.use_sensor_pipeline:
             return False
-        if self.mdm_mm_per_count <= 0.:
-            return False
-        return True
+        return self.mdm_mm_per_count > 0.0
 
     def _diff_sample(self, rr_delta_mm):
         """Feed one pulse's Roadrunner travel into the rolling window.
@@ -1395,18 +1484,25 @@ class BufferManager:
         if not self._diff_available():
             return None
         try:
+            assert self.backend is not None
             _present, counter = self.backend.mdm()
         except Exception:
-            logging.exception("buffer_manager %s: MDM read failed -"
-                              " differential monitoring disabled for this"
-                              " run", self.name)
+            logger.exception(
+                "buffer_manager %s: MDM read failed -"
+                " differential monitoring disabled for this"
+                " run",
+                self.name,
+            )
             self._diff_disabled = True
             return None
         if counter is None:
             # Backend has no MDM (e.g. a future non-Mellow board). Say so
             # once, then stay quiet rather than warning every pulse.
-            logging.info("buffer_manager %s: no MDM counter available -"
-                         " differential monitoring inactive", self.name)
+            logger.info(
+                "buffer_manager %s: no MDM counter available -"
+                " differential monitoring inactive",
+                self.name,
+            )
             self._diff_disabled = True
             return None
         if self._diff_mdm_base is None:
@@ -1429,23 +1525,29 @@ class BufferManager:
         # Allowance = a fraction of the window PLUS one full MDM count,
         # because one count is the quantization floor and a +/-1 count
         # reading is not evidence of anything.
-        allow = (self.differential_window_mm * self.differential_tolerance
-                 + self.mdm_mm_per_count)
+        allow = (
+            self.differential_window_mm * self.differential_tolerance
+            + self.mdm_mm_per_count
+        )
         self._diff_reset()
         if abs(mdm_mm - rr_mm) <= allow:
             return None
         # Deliberately does NOT claim "buckling". Both encoders are
         # friction-coupled and either can slip; all that is actually known
         # is that the two ends of the bowden disagree.
-        which = ("buffer end ahead of toolhead end"
-                 if mdm_mm > rr_mm else
-                 "toolhead end ahead of buffer end")
-        return ("filament path disagreement: over %.1fmm at the Roadrunner"
-                " the MDM measured %.1fmm (%d counts x %.3fmm), %s."
-                " Either the strand is buckling/compressing inside the"
-                " bowden or one of the two encoders is slipping - this"
-                " check cannot tell which"
-                % (rr_mm, mdm_mm, counts, self.mdm_mm_per_count, which))
+        which = (
+            "buffer end ahead of toolhead end"
+            if mdm_mm > rr_mm
+            else "toolhead end ahead of buffer end"
+        )
+        return (
+            f"filament path disagreement: over {rr_mm:.1f}mm at the"
+            f" Roadrunner the MDM measured {mdm_mm:.1f}mm ({counts} counts"
+            f" x {self.mdm_mm_per_count:.3f}mm), {which}."
+            " Either the strand is buckling/compressing inside the"
+            " bowden or one of the two encoders is slipping - this"
+            " check cannot tell which"
+        )
 
     def _diff_check(self, rr_delta_mm, fail_fn):
         """Sample, and act per differential_action. Returns True if the
@@ -1456,17 +1558,30 @@ class BufferManager:
         if self.differential_action == "error":
             fail_fn(reason)
             return True
-        logging.warning("buffer_manager %s: %s", self.name, reason)
-        self.gcode.respond_info("buffer_manager %s: %s"
-                                % (self.name, reason))
+        logger.warning("buffer_manager %s: %s", self.name, reason)
+        self.gcode.respond_info(f"buffer_manager {self.name}: {reason}")
         return False
 
     def _stop_lane(self):
         try:
+            assert self.backend is not None
             self.backend.stop()
         except Exception:
-            logging.exception("buffer_manager %s: backend stop failed",
-                              self.name)
+            logger.exception("buffer_manager %s: backend stop failed", self.name)
+
+    def _extrude(self, gcode_move, mm, speed_mm_min):
+        """Issue a bounded G1 E<mm> at speed_mm_min, restoring the caller's
+        absolute/relative extrude mode afterwards. mm may be negative
+        (retract). Shared by phase B's assist pull, the synchronized unload
+        retract, and the post-sensor unload clear pulses - the three sites
+        that concurrently drive an extruder move alongside a backend
+        jog()/run(). Exceptions propagate to the caller, which already wraps
+        each call site with its own phase-specific failure message."""
+        was_abs = gcode_move.get_status(self.reactor.monotonic())["absolute_extrude"]
+        script = f"M83\nG1 E{mm:.2f} F{round(speed_mm_min)}\nM400"
+        if was_abs:
+            script += "\nM82"
+        self.gcode.run_script(script)
 
     def _exec_template(self, template, label):
         script = template.render().strip()
@@ -1475,8 +1590,7 @@ class BufferManager:
         try:
             self.gcode.run_script(script)
         except Exception:
-            logging.exception("buffer_manager %s: error running %s",
-                              self.name, label)
+            logger.exception("buffer_manager %s: error running %s", self.name, label)
 
     # ------------------------------------------------------------------
     # G-code commands
@@ -1487,9 +1601,10 @@ class BufferManager:
         # cached value can be stale or unset when a load is armed. Take a
         # fresh reading rather than trusting it.
         try:
+            assert self.backend is not None
             self.arm = self.backend.arm()
         except Exception:
-            logging.exception("buffer_manager %s: arm probe failed", self.name)
+            logger.exception("buffer_manager %s: arm probe failed", self.name)
 
     def _require_active_role(self, gcmd, action="load"):
         # The lane's tool must be picked up and active - refuse otherwise,
@@ -1506,17 +1621,18 @@ class BufferManager:
         # while a different tool is mounted would push/pull filament in
         # the wrong toolhead. `action` only changes the wording below.
         try:
+            assert self.backend is not None
             role = self.backend.state().get("role")
         except Exception:
-            logging.exception("buffer_manager %s: role check failed",
-                              self.name)
+            logger.exception("buffer_manager %s: role check failed", self.name)
             role = None
         if role != "active":
             raise gcmd.error(
-                "buffer_manager %s: refusing to %s - lane role is '%s',"
-                " not 'active'. Pick up this lane's tool (LLL_ROLE"
-                " LANE=%s ROLE=active) before commanding motion on it."
-                % (self.lane_name, action, role, self.lane_name))
+                f"buffer_manager {self.lane_name}: refusing to {action} -"
+                f" lane role is '{role}', not 'active'. Pick up this lane's"
+                f" tool (LLL_ROLE LANE={self.lane_name} ROLE=active) before"
+                " commanding motion on it."
+            )
         # The role check above is a CONVENTION - it says what the buffer
         # believes, not what the toolchanger actually did. The thing that
         # decides where a 'G1 E' lands is Klipper's currently-active
@@ -1524,23 +1640,24 @@ class BufferManager:
         # marked active would otherwise drive filament into a different
         # toolhead. Fails closed if the toolhead cannot be read.
         try:
-            active_ex = self.printer.lookup_object(
-                'toolhead').get_extruder()
+            active_ex = self.printer.lookup_object("toolhead").get_extruder()
             active_name = active_ex.get_name()
         except Exception:
-            logging.exception("buffer_manager %s: active-extruder check"
-                              " failed", self.name)
+            logger.exception(
+                "buffer_manager %s: active-extruder check failed", self.name
+            )
             active_name = None
         if active_name != self.extruder_name:
             raise gcmd.error(
-                "buffer_manager %s: refusing to %s - this lane feeds '%s'"
-                " but the active extruder is '%s'. Select this lane's tool"
+                f"buffer_manager {self.lane_name}: refusing to {action} -"
+                f" this lane feeds '{self.extruder_name}' but the active"
+                f" extruder is '{active_name}'. Select this lane's tool"
                 " first; E-moves would otherwise go to the wrong toolhead."
-                % (self.lane_name, action, self.extruder_name, active_name))
+            )
 
     def cmd_LOAD_BEGIN(self, gcmd):
         self._require_active_role(gcmd)
-        timeout = gcmd.get_float("TIMEOUT", self.load_timeout, above=0.)
+        timeout = gcmd.get_float("TIMEOUT", self.load_timeout, above=0.0)
         self.load_fail_reason = None
         self._phase_abort_reason = None
         self.load_deadline = self.reactor.monotonic() + timeout
@@ -1558,10 +1675,15 @@ class BufferManager:
             self._phaseA_stall_streak = 0
             self._phaseB_slip_streak = 0
             self.load_phase = PHASE_A_PUSH
-            self.reactor.register_callback(self._run_phase_a)
+            # Captured here, at the scheduling call site, not inside
+            # _run_phase_a's own body - see _load_generation in __init__.
+            self._load_generation += 1
+            gen = self._load_generation
+            self.reactor.register_callback(lambda et, g=gen: self._run_phase_a(et, g))
             gcmd.respond_info(
-                "LLL %s: phase A (push) - pulsing toward the Roadrunner"
-                " sensor" % (self.lane_name,))
+                f"LLL {self.lane_name}: phase A (push) - pulsing toward the Roadrunner"
+                " sensor"
+            )
             return
 
         # No-sensor fallback: arm-settle heuristic over the firmware's own
@@ -1575,8 +1697,9 @@ class BufferManager:
             self.load_phase = PHASE_FEEDING
         self._rearm_load_timer()
         gcmd.respond_info(
-            "LLL %s: waiting for filament to reach the extruder (no-sensor"
-            " fallback)" % (self.lane_name,))
+            f"LLL {self.lane_name}: waiting for filament to reach the"
+            " extruder (no-sensor fallback)"
+        )
 
     def cmd_LOAD_ABORT(self, gcmd):
         self.load_phase = PHASE_IDLE
@@ -1587,10 +1710,21 @@ class BufferManager:
         # on its next poll and returns without running load_failed_gcode
         # (load_phase is already IDLE here, not FAILED).
         self._phase_abort_reason = "aborted"
+        # Also invalidates any in-flight phase A/B greenlet immediately,
+        # independent of whether it has consumed _phase_abort_reason yet -
+        # see _load_generation in __init__.
+        self._load_generation += 1
         self.reactor.update_timer(self.load_timer, self.reactor.NEVER)
         if self.use_sensor_pipeline:
-            self._stop_lane()
-        gcmd.respond_info("LLL %s: load watcher cancelled" % (self.lane_name,))
+            # _stop_lane() -> backend.stop() -> gcode.run_script(), which
+            # takes gcode.mutex. This handler is itself running under that
+            # same mutex (Klipper's mux command dispatch), and the mutex is
+            # not reentrant - calling it inline here would deadlock. Defer
+            # to a callback greenlet instead, same idiom this module already
+            # uses everywhere else a lane-stop needs real gcode dispatch
+            # (see _fail_load, _stop_then_unloaded).
+            self.reactor.register_callback(lambda et: self._stop_lane())
+        gcmd.respond_info(f"LLL {self.lane_name}: load watcher cancelled")
 
     def cmd_UNLOAD(self, gcmd):
         # Same precondition as load - see _require_active_role()'s
@@ -1599,7 +1733,7 @@ class BufferManager:
         # fallback's buffer-only pull has no business running against a
         # docked tool's lane.
         self._require_active_role(gcmd, action="unload")
-        timeout = gcmd.get_float("TIMEOUT", self.unload_timeout, above=0.)
+        timeout = gcmd.get_float("TIMEOUT", self.unload_timeout, above=0.0)
         self.unload_fail_reason = None
         self._unload_abort_reason = None
         self.unload_deadline = self.reactor.monotonic() + timeout
@@ -1612,9 +1746,15 @@ class BufferManager:
             self._unload_since_switch_mm = 0.0
             self._unload_clear_accum_mm = 0.0
             self.unload_phase = UNLOAD_TIP_FORM
-            self.reactor.register_callback(self._run_unload_tip_form)
-            gcmd.respond_info(
-                "LLL %s: unloading - forming tip" % (self.lane_name,))
+            # Captured here, at the scheduling call site, not inside
+            # _run_unload_tip_form's own body - see _unload_generation in
+            # __init__.
+            self._unload_generation += 1
+            gen = self._unload_generation
+            self.reactor.register_callback(
+                lambda et, g=gen: self._run_unload_tip_form(et, g)
+            )
+            gcmd.respond_info(f"LLL {self.lane_name}: unloading - forming tip")
             return
 
         # No-sensor fallback: unchanged pre-T8 behaviour - LLL_RUN back,
@@ -1624,9 +1764,9 @@ class BufferManager:
         self.reactor.update_timer(self.unload_timer, self.unload_deadline)
         # MS=0 lets the backend bound the run with its own default (the
         # LLL backend falls back to firmware run_max_ms).
+        assert self.backend is not None
         self.backend.run("back", ms)
-        gcmd.respond_info(
-            "LLL %s: unloading (no-sensor fallback)" % (self.lane_name,))
+        gcmd.respond_info(f"LLL {self.lane_name}: unloading (no-sensor fallback)")
 
     def cmd_UNLOAD_ABORT(self, gcmd):
         self.unload_phase = UNLOAD_IDLE
@@ -1637,15 +1777,21 @@ class BufferManager:
         # unload_failed_gcode (unload_phase is already IDLE here, not
         # FAILED) - same idiom as cmd_LOAD_ABORT.
         self._unload_abort_reason = "aborted"
+        # Also invalidates any in-flight TIP_FORM/RETRACT/CLEAR greenlet
+        # immediately, independent of whether it has consumed
+        # _unload_abort_reason yet - see _unload_generation in __init__.
+        self._unload_generation += 1
         self.reactor.update_timer(self.unload_timer, self.reactor.NEVER)
-        self._stop_lane()
-        gcmd.respond_info("LLL %s: unload cancelled" % (self.lane_name,))
+        # Deferred for the same reason as cmd_LOAD_ABORT above: this handler
+        # runs under gcode.mutex, and _stop_lane() -> backend.stop() ->
+        # gcode.run_script() would try to take it again.
+        self.reactor.register_callback(lambda et: self._stop_lane())
+        gcmd.respond_info(f"LLL {self.lane_name}: unload cancelled")
 
     def get_status(self, eventtime):
         learned_rate = None
         if self._learned_feed_ms > 0:
-            learned_rate = self._learned_feed_mm / float(
-                self._learned_feed_ms)
+            learned_rate = self._learned_feed_mm / float(self._learned_feed_ms)
         return {
             "lane": self.lane_name,
             "sensor_pipeline": self.use_sensor_pipeline,

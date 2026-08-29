@@ -980,7 +980,10 @@ command_lll_enable(uint32_t *args)
             adc_module_release();
         } else if (func == FUNC_IOEXT) {
             ioext_release_all();                           // safety
-        } else if (func == FUNC_BUTTONS || func == FUNC_MBSIG) {
+        } else if (func == FUNC_BUTTONS) {
+            // FUNC_MBSIG dropped from this condition: it is already fully
+            // handled by its own dedicated branch above, so it could never
+            // reach here - dead clause, not a behaviour change.
             if (manual) {                // a hold in flight -> explicit STOP
                 manual = 0;
                 stop_req = 1;            // otherwise the hold FSM inherits the motion

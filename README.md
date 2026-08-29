@@ -168,7 +168,8 @@ rather than for merging.
 
 ## Install & update
 
-Basic install script present that links the extras, and buffer.c to ~/klipper folders.
+Host side (Klipper extras + `buffer.c`): clone this repo and run the install
+script, which symlinks everything into your Klipper checkout.
 
 ```bash
 cd ~
@@ -178,12 +179,16 @@ git clone https://github.com/Vylyne/buffer_manager.git
 
 Klipper folder can be overridden by setting KLIPPER_DIR before running the script.
 
-[Dashbaord install instructions](dashboard/INSTALL.md)
+[Dashboard install instructions](dashboard/INSTALL.md)
 
-I personally manage my MCU firmware through [mcu-updater](https://github.com/Vylyne/mcu-updater/), which
-allows automatically adds the requested Klipper Makefile Patch for build removing after.
+Firmware side (build + flash this board): use
+[mcu-updater](https://github.com/Vylyne/mcu-updater/) — it handles the
+whole flow including first-time provisioning from DFU, and automatically
+adds/removes the Klipper Makefile patch for the build. CLI
+(`./mcu-updater add-mcu --type flylllplusbuffer`), a guided interactive
+console menu (select the type from a list), or a Mainsail-fork panel, in
+increasing order of hand-holding. Example config for this firmware:
 
-Example mcu-updater config for this firmware.
 ```ini
 [type flylllplusbuffer]
 chipset: stm32f072xb
@@ -208,9 +213,9 @@ serials:
 ![Klipper MenuConfig](docs/img/klipper.png)
 
 **Target**: STM32F072, 8 KiB bootloader offset (application address `0x8002000`,
-must match Katapult), 8 MHz crystal, USB on PA11/PA12.
-
-[manual firmware install path](#installation)
+must match Katapult), 8 MHz crystal, USB on PA11/PA12. No motor/stepper/TMC
+section in printer.cfg — the firmware owns the motor; the host talks to it
+through `[lll_buffer]` (see [Configuration](#configuration)).
 
 ---
 
@@ -316,158 +321,6 @@ Full walkthrough: **[dashboard/INSTALL.md](dashboard/INSTALL.md)**.
 
 ---
 
-## Installation
-
-> Done from your Klipper host (e.g. a Raspberry Pi). Commands assume `~/klipper` and `~/katapult` ([Arksine/katapult](https://github.com/Arksine/katapult)) are cloned, the Klipper build toolchain is installed, and `dfu-util` is available (`sudo apt install dfu-util`).
->
-> No usable BOOT/RESET buttons on your unit? See the companion guide: [LLL-Plus-Katapult-NoDFU](https://github.com/Nitrooxyde/LLL-Plus-Katapult-NoDFU).
-
-### Step 0 — Find your buffer & power it
-
-Connect the buffer's USB to the host **and** give it **24 V on VIN** (the motor needs it; the firmware configures the TMC at first boot, so 24 V must be present then). List USB serial devices to identify the board and note your **unique chip ID** (you'll reuse it in `printer.cfg`):
-
-```bash
-ls /dev/serial/by-id/
-# e.g. usb-Klipper_stm32f072xb_3C003A...3720-if00   (or a Mellow / katapult id)
-#                            └──────── your XXXXXX ────────┘
-```
-
-### Step 1 — Enter DFU mode (to install Katapult)
-
-On the buffer board: **hold BOOT**, tap **RESET**, release **RESET**, then release **BOOT**. Confirm with `sudo dfu-util -l` → `Found DFU: [0483:df11] ... name="@Internal Flash  /0x08000000/064*0002Kg"`.
-
-### Step 2 — Back up the existing firmware (recommended)
-
-```bash
-sudo dfu-util -a 0 -d 0483:df11 -U ~/lll_backup_flash.bin       -s 0x08000000:0x20000
-sudo dfu-util -a 1 -d 0483:df11 -U ~/lll_backup_optionbytes.bin            # option bytes
-```
-
-### Step 3 — Build & flash Katapult (one-time bootloader)
-
-Katapult lets you flash all **future** updates over USB without opening the case.
-
-```bash
-cd ~/katapult
-make menuconfig
-```
-
-- Micro-controller Architecture: **STMicroelectronics STM32**
-- Processor model: **STM32F072**
-- Clock Reference: **8 MHz crystal**
-- Communication interface: **USB (on PA11/PA12)**
-- Application start offset: **8 KiB**
-- Support bootloader entry on rapid double click of reset: **OFF** ⚠️ *(the board **does** have BOOT/RESET buttons — that's how you entered DFU in Step 1 — but double-click-reset bootloader entry is **not reliable on this board**, and leaving this ON makes it fail to enumerate. It isn't needed anyway: normal bootloader entry is done over USB — `flashtool.py -r`, done automatically when flashing.)*
-
-```bash
-make clean && make
-# board still in DFU (Step 1); flash with mass-erase so no stale app remains:
-sudo dfu-util -a 0 -d 0483:df11 -D out/katapult.bin -s 0x08000000:force:mass-erase:leave
-```
-
-Re-plug USB and confirm Katapult enumerates: `ls /dev/serial/by-id/` → `usb-katapult_stm32f072xb_XXXXXX-if00`.
-
-### Step 4 — Get this repository
-
-Clone this repo onto the host (all following steps reference it by absolute path — you are still in `~/katapult` at this point, so relative paths would break):
-
-```bash
-git clone https://github.com/Nitrooxyde/Mellow-LLL-Plus-Canonical.git ~/lll-firmware
-cd ~/lll-firmware
-```
-
-### Step 5 — Add this firmware to Klipper
-
-Two files — the MCU task **and** the host extra:
-
-```bash
-cp ~/lll-firmware/src/buffer.c ~/klipper/src/buffer.c
-cp ~/lll-firmware/klippy/extras/lll_buffer.py ~/klipper/klippy/extras/lll_buffer.py
-```
-
-Add **one line** to `~/klipper/src/Makefile` (only compiled for the F072 buffer, never for your main board):
-
-```make
-src-$(CONFIG_MACH_STM32F072) += buffer.c
-```
-
-> ⚠️ This Makefile line is reverted by `git pull` on the Klipper tree — re-add it after updating Klipper. `buffer.c` and `lll_buffer.py` themselves are untracked and survive.
-
-### Step 6 — Build Klipper
-
-> ⚠️ `make menuconfig` overwrites `~/klipper/.config`. If you build other MCUs (your main board, toolhead…) from this same tree, **back up its config first** and restore it afterwards:
->
-> ```bash
-> cp ~/klipper/.config ~/klipper/.config.mainboard   # backup
-> # ...build & flash the buffer...
-> cp ~/klipper/.config.mainboard ~/klipper/.config    # restore later
-> ```
-
-The exact build configuration used for the shipped binary is provided as **[build/klipper.config](build/klipper.config)** — you can copy it straight in:
-
-```bash
-cp ~/lll-firmware/build/klipper.config ~/klipper/.config
-cd ~/klipper && make olddefconfig     # or: make menuconfig and verify
-```
-
-Or set it manually via `make menuconfig`: **STMicroelectronics STM32** → **STM32F072** → Bootloader offset **8 KiB bootloader** *(must match Katapult — application address `0x8002000`)* → Clock Reference **8 MHz crystal** → Communication interface **USB (on PA11/PA12)**.
-
-```bash
-make clean && make
-```
-
-### Step 7 — Flash over USB (via Katapult)
-
-```bash
-~/klippy-env/bin/python3 ~/katapult/scripts/flashtool.py \
-  -f ~/klipper/out/klipper.bin \
-  -d /dev/serial/by-id/usb-katapult_stm32f072xb_XXXXXX-if00
-```
-
-> Use the **klippy-env** Python — it has `pyserial` (the system Python usually doesn't). After flashing, the board re-enumerates as `usb-Klipper_stm32f072xb_XXXXXX-if00`.
-
-### Step 8 — printer.cfg
-
-Follow [Configuration](#configuration) / [config/printer.cfg.example](config/printer.cfg.example), then `FIRMWARE_RESTART`.
-
-**No motor/stepper/TMC section** — the firmware owns the motor; the host talks to it through `[lll_buffer]`.
-
----
-
-## Prebuilt binary
-
-If you'd rather not build, the repo ships the **exact binary running in production on the reference setup**: [`build/klipper_canonical_v1_fix9.bin`](build/klipper_canonical_v1_fix9.bin) (53 824 bytes), built from Klipper `v0.13.0-700` (commit `d6ea62542`), build `20260705_234145`, config = [`build/klipper.config`](build/klipper.config). It is the canonical firmware including safety fix #9 (boot grace period).
-
-SHA-256: `9239bdc367096438e72528d361f75f1ebb811784698cb0872ca79b2410837944`
-
-```bash
-sha256sum ~/lll-firmware/build/klipper_canonical_v1_fix9.bin    # verify before flashing
-~/klippy-env/bin/python3 ~/katapult/scripts/flashtool.py \
-  -f ~/lll-firmware/build/klipper_canonical_v1_fix9.bin \
-  -d /dev/serial/by-id/usb-katapult_stm32f072xb_XXXXXX-if00
-```
-
-Building from source (Steps 4–7) remains the clean path — it guarantees your `klippy` host version and the MCU firmware come from the same tree.
-
-## Updating later (no case opening)
-
-> ⚠️ Same multi-MCU warning as Step 6: if you build other MCUs from this Klipper tree, `~/klipper/.config` may currently target your **main board** — building with it and flashing the result to the buffer would flash the **wrong binary**. Re-copy the buffer config (or verify via `make menuconfig` that `.config` targets the STM32F072) before building.
-
-```bash
-[ -f ~/klipper/.config ] && cp ~/klipper/.config ~/klipper/.config.pre_lll   # backup whatever was there
-cp ~/lll-firmware/build/klipper.config ~/klipper/.config   # make sure the build targets the buffer (STM32F072)
-cd ~/klipper && make olddefconfig
-make clean && make          # (re-add the Makefile line if a git pull removed it)
-~/klippy-env/bin/python3 ~/katapult/scripts/flashtool.py \
-  -f ~/klipper/out/klipper.bin \
-  -d /dev/serial/by-id/usb-Klipper_stm32f072xb_XXXXXX-if00
-# then FIRMWARE_RESTART
-```
-
-`flashtool` reboots the running app into Katapult over USB automatically — you can target the **Klipper** serial directly, no buttons. The bundled helper automates the whole flash (bootloader request, wait, flash, wait for re-enumeration): `bash ~/lll-firmware/scripts/flash_lll.sh <chip-serial>` — one board at a time, flashes `~/klipper/out/klipper.bin`.
-
----
-
 ## TMC2208 register values
 
 Derived directly from Mellow's firmware parameters (via the `TMCStepper` library it uses), not guessed:
@@ -522,6 +375,13 @@ Two honest notes:
 
 ## Field validation status
 
+**This is about the canonical firmware core (roles, modes, buttons, IOEXT,
+TMC, telemetry) — not the load/unload pipeline.** The pipeline
+(`klippy/extras/buffer_manager.py`, tasks T8–T10) is what the top-of-file
+banner and [CLAUDE.md](CLAUDE.md) mean by "nothing has run on hardware yet";
+every distance/duration/threshold in it stays an unbenched placeholder
+regardless of what this section says about the core below it.
+
 Honest scope of what has been tested:
 
 - **One reference setup**: a single printer, **two LLL Plus boards** (two lanes), STM32F072CB.
@@ -565,9 +425,22 @@ try it on yours, **please tell us how it went** — we are genuinely asking:
 Don't hesitate — no report is too small, and none of them will be met with
 anything but gratitude.
 
-## Language note (upstream)
+## Language note
 
-The shipped sources are **byte-identical** to the deployment validated in production on the reference setup — that is the core guarantee of this repo, backed by the published SHA-256 fingerprints. As a consequence, some runtime messages and code comments are in **French**. Translations are welcome as PRs, but be aware they would break the byte-for-byte identity with the deployed code — which is why the shipped files themselves are left untouched.
+This is stale as an upstream-parity claim and kept only as a historical note:
+an earlier version of this document said the shipped sources were
+byte-identical to a French-commented upstream deployment, and that
+translating them would be refused for that reason. That is no longer this
+fork's policy — see [CLAUDE.md](CLAUDE.md): byte-identical parity with
+upstream is **explicitly abandoned**, and comments are translated to English
+as they are touched (see [Changes to upstream](#changes-to-upstream), and
+task T5 in [docs/PORT_RUNBOOK.md](docs/PORT_RUNBOOK.md)). Any remaining
+French text is inherited from a file this fork has not yet touched, not a
+guarantee. The one artifact this note doesn't apply to is
+[`build/klipper_canonical_v1_fix9.bin`](build/klipper_canonical_v1_fix9.bin)
+itself — a compiled binary can't be "translated" after the fact, and it
+predates this fork's PA2/PA3 buttons, PA4/PA5 MDM, and protocol-version
+changes regardless of language.
 
 ---
 
