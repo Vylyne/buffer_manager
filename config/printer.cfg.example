@@ -84,8 +84,8 @@ role: parked
 # EVERY DISTANCE AND DURATION BELOW IS A PLACEHOLDER. None of it has run on
 # hardware. Measure on your own machine before trusting any of it.
 #
-# Omit roadrunner_sensor + post_extruder_pin (both, together) to fall back to
-# the sensorless arm-settle heuristic instead of the three-phase pipeline.
+# Omit roadrunner_sensor + the toolhead switch (both, together) to fall back
+# to the sensorless arm-settle heuristic instead of the three-phase pipeline.
 # --------------------------------------------------------------------------
 #[buffer_manager lll]
 #lane: lll                  # the [lll_buffer] section this drives
@@ -96,7 +96,11 @@ role: parked
 #                           #   can never be driven by mistake.
 #roadrunner_sensor:         # name of the [high_resolution_filament_sensor]
 #                           #   before the extruder
-#post_extruder_pin:         # raw switch pin after the extruder gear
+#post_extruder_pin:         # raw switch pin after the extruder gear, OR:
+#post_extruder_sensor:      # name of an existing [filament_switch_sensor]
+#                           #   on that switch. Use this when the pin is
+#                           #   already a runout sensor - Klipper allows
+#                           #   only one owner per pin. Set one, not both.
 #
 #pulse_ms: 100              # Phase A pulse width. Matches the Roadrunner's
 #                           #   own 100 ms refresh - sampling faster gains

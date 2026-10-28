@@ -346,12 +346,24 @@ class BufferManager:
         # ------------------------------------------------------------
         self.roadrunner_name = config.get("roadrunner_sensor", "")
         post_extruder_pin = config.get("post_extruder_pin", None)
+        # The toolhead switch can instead be an existing
+        # [filament_switch_sensor]. Klipper lets only one module claim an
+        # input pin, so a printer that already shows the switch as a
+        # runout sensor (or names it in its toolchanger config) cannot
+        # also hand the raw pin to post_extruder_pin.
+        self.post_extruder_sensor_name = config.get("post_extruder_sensor", "")
+        if post_extruder_pin is not None and self.post_extruder_sensor_name:
+            raise config.error(
+                f"buffer_manager {self.name}: set post_extruder_pin or"
+                " post_extruder_sensor, not both - they name the same switch"
+            )
+        self.post_extruder_sensor = None  # resolved in _connect()
         have_rr = bool(self.roadrunner_name)
-        have_pe = post_extruder_pin is not None
+        have_pe = post_extruder_pin is not None or bool(self.post_extruder_sensor_name)
         if have_rr != have_pe:
             raise config.error(
                 f"buffer_manager {self.name}: roadrunner_sensor and post_extruder_pin"
-                " must both be set together (the three-phase load pipeline"
+                " (or post_extruder_sensor) must both be set together (the three-phase load pipeline"
                 " needs both to detect the phase A/B boundaries), or both"
                 " left unset to use the no-sensor arm-settle fallback"
             )
@@ -595,7 +607,7 @@ class BufferManager:
         self.load_timer = self.reactor.register_timer(self._load_timer)
         self.unload_timer = self.reactor.register_timer(self._unload_timer)
 
-        if have_pe:
+        if post_extruder_pin is not None:
             # Raw pin via buttons.register_buttons, reusing the pattern
             # at buffer_manager_old/klippy_extras/buffer_manager.py:
             # 156-172: a single registration delivers one fresh, debounced
@@ -677,6 +689,16 @@ class BufferManager:
                     f"buffer_manager {self.name}: no [high_resolution_filament_sensor"
                     f" {self.roadrunner_name}] section found"
                 )
+            if self.post_extruder_sensor_name:
+                sensor = self.printer.lookup_object(
+                    "filament_switch_sensor " + self.post_extruder_sensor_name, None
+                )
+                if sensor is None:
+                    raise self.printer.config_error(
+                        f"buffer_manager {self.name}: no [filament_switch_sensor"
+                        f" {self.post_extruder_sensor_name}] section found"
+                    )
+                self.post_extruder_sensor = sensor.runout_helper
             self.extruder = self.printer.lookup_object(self.extruder_name, None)
             if self.extruder is None:
                 raise self.printer.config_error(
@@ -885,6 +907,17 @@ class BufferManager:
     def _toolhead_switch_event(self, eventtime, state):
         self._toolhead_switch_state = bool(state & 1)
 
+    def _toolhead_switch(self):
+        """True while the switch after the extruder gear sees filament.
+
+        A post_extruder_sensor is read live from its runout helper, so it is
+        right even when filament was already at the switch before this load
+        started. A raw post_extruder_pin only reports edges.
+        """
+        if self.post_extruder_sensor is not None:
+            return bool(self.post_extruder_sensor.filament_present)
+        return self._toolhead_switch_state
+
     def _run_phase_a(self, eventtime, generation):
         # Phase A - PUSH: buffer alone, cold-safe. Pulsed jog() on a
         # pulse_ms tick until the Roadrunner reports filament_detected.
@@ -1074,7 +1107,7 @@ class BufferManager:
                     return
             else:
                 self._phaseB_slip_streak = 0
-            if self._toolhead_switch_state:
+            if self._toolhead_switch():
                 break
             if attempts >= self.assist_max_pulses:
                 self._fail_load(
@@ -1201,7 +1234,7 @@ class BufferManager:
             )
             return
         gcode_move = self.printer.lookup_object("gcode_move")
-        switch_cleared = not self._toolhead_switch_state
+        switch_cleared = not self._toolhead_switch()
         sensor_cleared = False
         self._unload_since_switch_mm = 0.0
         # T10: differential monitoring runs inside the loop below via
@@ -1275,7 +1308,7 @@ class BufferManager:
                         " preventing that)"
                     )
                     return
-            if not switch_cleared and not self._toolhead_switch_state:
+            if not switch_cleared and not self._toolhead_switch():
                 switch_cleared = True
             if switch_cleared and not status.get("filament_detected", True):
                 sensor_cleared = True
@@ -1798,7 +1831,7 @@ class BufferManager:
             "load_phase": self.load_phase,
             "load_fail_reason": self.load_fail_reason,
             "learned_feed_mm_per_ms": learned_rate,
-            "toolhead_switch": self._toolhead_switch_state,
+            "toolhead_switch": self._toolhead_switch(),
             "unload_phase": self.unload_phase,
             "unload_fail_reason": self.unload_fail_reason,
             "arm": self.arm,

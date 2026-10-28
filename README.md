@@ -291,6 +291,44 @@ Two things matter:
 
 Optional section options: `feed_mode:` (startup automation level), `enable:` / `disable:` (force functions on/off from config), `poll_interval:` (state refresh, default 1.5 s), and `event_gcode:` (a Jinja template run on **every** event the board pushes — e.g. `PAUSE` on a jam within ~20–50 ms).
 
+### Load and unload: `[buffer_manager]`
+
+`[lll_buffer]` only talks to the board. The load/unload pipeline is a second
+section on top of it, one per lane, named after the lane it drives:
+
+```ini
+[lll_buffer t0]
+mcu: T0_buffer
+role: parked
+event_gcode:
+    BUFFER_LOAD_EVENT LANE=t0 NAME={event.name} VALUE={event.value}
+
+[buffer_manager t0]
+lane: t0
+extruder: extruder
+roadrunner_sensor: T0_roadrunner
+post_extruder_sensor: T0_filament_sensor
+```
+
+- The `event_gcode` bridge line is **required**: it is how the pipeline hears
+  arm and MDM events, and `buffer_manager` refuses to start without it.
+- `extruder` must be this lane's own extruder. `BUFFER_LOAD_BEGIN` and
+  `BUFFER_UNLOAD` are refused unless it is the active extruder and the lane's
+  role is `active`.
+- The toolhead switch is either `post_extruder_pin` (a raw pin
+  `buffer_manager` owns) or `post_extruder_sensor` (an existing
+  `[filament_switch_sensor]` on that switch). Klipper allows one owner per
+  pin, so if the switch is already a runout sensor, use
+  `post_extruder_sensor`. Omit both it and `roadrunner_sensor` to use the
+  sensorless arm-settle fallback instead.
+
+Commands: `BUFFER_LOAD_BEGIN LANE=t0`, `BUFFER_LOAD_ABORT LANE=t0`,
+`BUFFER_UNLOAD LANE=t0`, `BUFFER_UNLOAD_ABORT LANE=t0`. Every other option,
+and the fact that all of its distances and timings are untested
+placeholders, is in [config/printer.cfg.example](config/printer.cfg.example).
+
+### Entrance sensor
+
 The entrance sensor can still pause the print the classic way — it is exposed as a normal MCU pin:
 
 ```ini
