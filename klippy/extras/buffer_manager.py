@@ -711,6 +711,16 @@ class BufferManager:
         # Done every boot with a direct MCU command rather than LLL_SET: it
         # must not depend on [save_variables] being present, and it must not
         # quietly become part of the user's persisted tweak set.
+        #
+        # Not sent from here: Klipper runs klippy:ready handlers with reactor
+        # pauses disabled, and set_event_mask waits for the board's reply.
+        # Sending it here raised "reactor pause disabled", and the reply that
+        # arrived afterwards crashed Klipper with an unhandled exception that
+        # shut the main MCU down. A registered callback runs in a greenlet
+        # that may wait.
+        self.reactor.register_callback(self._apply_event_mask)
+
+    def _apply_event_mask(self, eventtime):
         try:
             assert self.backend is not None
             p = self.backend.set_event_mask(self.event_mask)
